@@ -28,6 +28,10 @@ type fakeEngine struct {
 	// text returned for each extracted page; missing pages get a default.
 	text map[int]string
 
+	// confidence, when set for a page, makes its block report a measured
+	// confidence — what an OCR tier does and a native parser does not.
+	confidence map[int]float64
+
 	// emptyPages makes the engine return pages with no blocks — what a vision
 	// tier does when it reads a page and finds nothing.
 	emptyPages bool
@@ -71,12 +75,20 @@ func (f *fakeEngine) Extract(_ context.Context, req *engine.ExtractRequest) (*en
 			Classification: canonical.Classification{Type: canonical.PageTypeTextBased, Confidence: 1},
 		}
 		if !f.emptyPages {
-			page.Blocks = []canonical.Block{{
+			block := canonical.Block{
 				ID:         fmt.Sprintf("p%d-b0", n),
 				Type:       canonical.BlockParagraph,
 				Text:       text,
 				Provenance: canonical.Provenance{Engine: f.name, EngineVersion: f.version, Method: "fake"},
-			}}
+			}
+			// An engine that measures reports how sure it was; one that reads a
+			// data structure reports nothing. The scorer treats them
+			// differently, so the fake has to be able to be either.
+			if conf, ok := f.confidence[n]; ok {
+				c := conf
+				block.Confidence = &c
+			}
+			page.Blocks = []canonical.Block{block}
 		}
 		out = append(out, page)
 	}
@@ -652,6 +664,86 @@ func TestAnOCRPageIsScoredOnWhatOCRProduced(t *testing.T) {
 	}
 	if len(vision.calls) != 0 {
 		t.Errorf("vision ran on a page OCR had already rescued: %v", vision.calls)
+	}
+}
+
+// The case the whole scorer change exists for, end to end through the router:
+// OCR returns text that looks completely fine and is wrong, and says so only
+// in its confidence.
+func TestAConfidentMisreadEscalatesToVision(t *testing.T) {
+	primary := &fakeEngine{
+		name: "pdf", version: "1", support: engine.SupportNative,
+		inspection: inspection("pdf", canonical.PageTypeScanned),
+	}
+	ocr := &fakeEngine{
+		name: "ocr", version: "1", inspectErr: engine.ErrUnsupported,
+		// Word-shaped, damage-free, and misread.
+		text:       map[int]string{1: "Rcglon Unlts Rcvcnuc Nortb l2O l4,4OO.OO"},
+		confidence: map[int]float64{1: 0.38},
+	}
+	vision := &fakeEngine{name: "mineru", version: "2.5", inspectErr: engine.ErrUnsupported,
+		text: map[int]string{1: clean}}
+
+	doc, err := visionRouter(t, primary, ocr, vision, nil).Process(context.Background(), request())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(vision.calls) != 1 {
+		t.Fatalf("a page OCR was 38%% sure of did not escalate: %v", vision.calls)
+	}
+	if got := doc.Pages[0].Blocks[0].Provenance.Engine; got != "mineru" {
+		t.Errorf("page engine = %s, want mineru", got)
+	}
+}
+
+// ...and the converse, which is what keeps Tier 3 a fallback: the same
+// well-formed text, read confidently, stays put.
+func TestAConfidentGoodReadDoesNotEscalate(t *testing.T) {
+	primary := &fakeEngine{
+		name: "pdf", version: "1", support: engine.SupportNative,
+		inspection: inspection("pdf", canonical.PageTypeScanned),
+	}
+	ocr := &fakeEngine{
+		name: "ocr", version: "1", inspectErr: engine.ErrUnsupported,
+		text:       map[int]string{1: clean},
+		confidence: map[int]float64{1: 0.96},
+	}
+	vision := &fakeEngine{name: "mineru", version: "2.5", inspectErr: engine.ErrUnsupported}
+
+	if _, err := visionRouter(t, primary, ocr, vision, nil).Process(context.Background(), request()); err != nil {
+		t.Fatal(err)
+	}
+	if len(vision.calls) != 0 {
+		t.Errorf("vision ran on a page read at 96%% confidence: %v", vision.calls)
+	}
+}
+
+// The measurement has to reach the page's quality record, not just the score,
+// so an operator can see why a page was or was not escalated.
+func TestTheMeasurementIsRecordedOnThePage(t *testing.T) {
+	primary := &fakeEngine{
+		name: "pdf", version: "1", support: engine.SupportNative,
+		inspection: inspection("pdf", canonical.PageTypeScanned),
+	}
+	ocr := &fakeEngine{
+		name: "ocr", version: "1", inspectErr: engine.ErrUnsupported,
+		text:       map[int]string{1: clean},
+		confidence: map[int]float64{1: 0.91},
+	}
+
+	doc, err := visionRouter(t, primary, ocr, nil, nil).Process(context.Background(), request())
+	if err != nil {
+		t.Fatal(err)
+	}
+	q := doc.Pages[0].Quality
+	if q == nil || q.MeasuredConfidence == nil {
+		t.Fatalf("no measurement on an OCR page: %+v", q)
+	}
+	if *q.MeasuredConfidence != 0.91 {
+		t.Errorf("measured confidence = %v, want 0.91", *q.MeasuredConfidence)
+	}
+	if q.MeasuredCoverage != 1 {
+		t.Errorf("coverage = %v; every character came from a scored block", q.MeasuredCoverage)
 	}
 }
 

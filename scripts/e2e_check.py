@@ -32,6 +32,10 @@ BASE = sys.argv[1] if len(sys.argv) > 1 else "http://127.0.0.1:8080"
 # them; `make e2e-ocr` sets this to "paddleocr" to assert the real one ran.
 EXPECT_OCR = os.environ.get("DOLICO_EXPECT_OCR", "")
 
+# Whether the server under test has the vision tier enabled. Unset means the
+# sweep does not assert on Tier 3 at all; `make e2e-vision` sets it.
+EXPECT_VISION = os.environ.get("DOLICO_EXPECT_VISION", "")
+
 PASS, FAIL = "\033[32mPASS\033[0m", "\033[31mFAIL\033[0m"
 failures: list[str] = []
 
@@ -78,6 +82,7 @@ def engines_used(doc: dict) -> set[str]:
 # Each fixture, and what routing must do with it. The PDFs are the interesting
 # rows: they are what the per-page routing design exists for.
 OCR_ENGINES = {"ocr-stub", "paddleocr", "pp-structurev3"}
+VISION = "mineru"
 # The tiers that actually read pixels, as opposed to the stub.
 REAL_OCR = {"paddleocr", "pp-structurev3"}
 # The OCR engine the assertions expect. Unset means "whichever is wired".
@@ -101,6 +106,7 @@ CASES = [
     # acceptable depends on what is wired.
     ("scanned.pdf",       1, set(),             {"pdf-inspector"}),
     ("scanned-table.pdf", 1, set(),             {"pdf-inspector"}),
+    ("faded.pdf",         1, set(),             {"pdf-inspector"}),
     ("mixed.pdf",         2, {"pdf-inspector"}, set()),
 ]
 
@@ -257,6 +263,42 @@ def main() -> int:
             "the Markdown view renders a real table",
             "| Region | Units | Revenue |" in md and "| North | 120 |" in md,
             md[:200],
+        )
+
+    if EXPECT_VISION:
+        # The third tier's entire claim: a page the OCR tier lost comes back
+        # from a different kind of engine. faded.pdf exists for this check --
+        # PP-StructureV3 returns a single character from it at 0.49 confidence,
+        # which is what puts the page under the vision threshold.
+        print("\nvision escalation (faded.pdf)")
+        faded = upload("faded.pdf").json()
+        page = faded["pages"][0]
+        engines = {b["provenance"]["engine"] for b in blocks(faded)}
+
+        check(
+            f"the faded page was re-read by {VISION}",
+            engines == {VISION},
+            f"engines: {sorted(engines)}",
+        )
+        check(
+            "the page records that it was escalated",
+            (page.get("quality") or {}).get("escalated") is True,
+            f"quality: {page.get('quality')}",
+        )
+        check(
+            "the escalation is visible in the page's reasons",
+            "vision_escalated" in page["classification"]["reasons"],
+            f"reasons: {page['classification']['reasons']}",
+        )
+        # The recovery, not just the routing: these words exist only as very
+        # faint pixels, and the OCR tier returned one character for the page.
+        text = " ".join(b.get("text") or "" for b in blocks(faded)).upper()
+        for word in ("SHIPPING RECEIPT", "8842-QX", "1,420.75"):
+            check(f"the vision tier recovered {word!r}", word in text, f"got {text[:140]!r}")
+        check(
+            "re-scoring the replaced page beat the OCR attempt",
+            (page.get("quality") or {}).get("score", 0) > 0.5,
+            f"score: {(page.get('quality') or {}).get('score')}",
         )
 
     print("\nerror paths")

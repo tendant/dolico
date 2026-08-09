@@ -42,6 +42,11 @@ var DefaultWeights = Weights{
 // known false positive, which is why density is only part of the score.
 const ExpectedChars = 400
 
+// MeasuredCoverage is the share of a page's text that must come from blocks
+// reporting their own confidence before that confidence is treated as a
+// measurement of the page rather than a detail of some of it.
+const MeasuredCoverage = 0.5
+
 // Score assesses a page and returns the quality record to attach to it.
 func Score(page *canonical.Page, w Weights) canonical.Quality {
 	text := PlainText(page)
@@ -55,6 +60,11 @@ func Score(page *canonical.Page, w Weights) canonical.Quality {
 	if page.Classification.Confidence > 0 || page.Classification.Type != canonical.PageTypeScanned {
 		c := page.Classification.Confidence
 		q.EngineConfidence = &c
+	}
+	measured, coverage := measuredConfidence(page.Blocks)
+	if coverage > 0 {
+		q.MeasuredConfidence = &measured
+		q.MeasuredCoverage = coverage
 	}
 
 	// An image-only page legitimately has no text. Scoring it on density would
@@ -74,6 +84,34 @@ func Score(page *canonical.Page, w Weights) canonical.Quality {
 		engineConf = *q.EngineConfidence
 	}
 
+	// A page whose text was measured is scored by its measurement.
+	//
+	// The three text signals can detect that extraction produced nothing, or
+	// produced damage. What they cannot detect is a confident misread: OCR
+	// emits no U+FFFD, and "Rcglon Unlts" is as word-like as "Region Units" to
+	// any language-agnostic test. So on a measured page they are treated as a
+	// ceiling that the measurement scales down, rather than as terms that can
+	// vote the engine's own uncertainty away -- as a weighted term it can, and
+	// the arithmetic is not close: with these weights no OCR page with text
+	// could score below 0.55 however unsure the engine was.
+	//
+	// This is not a reversal of the package's rule against trusting engine
+	// confidence. The rule is about *asserted* confidence -- a parser reading
+	// DOCX XML is not 95% sure, it is reading a data structure, and it reports
+	// no per-block confidence at all. Confidence that was measured is a
+	// different thing, and the canonical model already tells them apart.
+	if coverage >= MeasuredCoverage {
+		ceiling := w.Density + w.Replacement + w.Words
+		if ceiling <= 0 {
+			ceiling = 1
+		}
+		q.Score = clamp01((w.Density*density+
+			w.Replacement*(1-q.ReplacementRatio)+
+			w.Words*q.WordRatio)/ceiling) * measured
+		q.Score = clamp01(q.Score)
+		return q
+	}
+
 	total := w.Density + w.Replacement + w.Words + w.Engine
 	if total <= 0 {
 		total = 1
@@ -84,6 +122,47 @@ func Score(page *canonical.Page, w Weights) canonical.Quality {
 		w.Engine*engineConf) / total
 	q.Score = clamp01(q.Score)
 	return q
+}
+
+// measuredConfidence returns the length-weighted mean confidence of the blocks
+// that report one, and the share of the page's characters they account for.
+//
+// Length-weighted because a page is not equally wrong everywhere: one badly
+// read line among twenty good ones should move the page a twentieth, not a
+// half. Coverage is returned separately because a mean over 5% of a page says
+// nothing about the page.
+func measuredConfidence(blocks []canonical.Block) (mean, coverage float64) {
+	var weighted, scored, total float64
+	var walk func([]canonical.Block)
+	walk = func(bs []canonical.Block) {
+		for _, blk := range bs {
+			n := float64(len([]rune(blk.Text)))
+			total += n
+			if blk.Confidence != nil && n > 0 {
+				weighted += *blk.Confidence * n
+				scored += n
+			}
+			walk(blk.Quote)
+			if blk.List != nil {
+				for _, item := range blk.List.Items {
+					walk(item.Blocks)
+				}
+			}
+			if blk.Table != nil {
+				for _, row := range blk.Table.Grid {
+					for _, cell := range row {
+						walk(cell.Blocks)
+					}
+				}
+			}
+		}
+	}
+	walk(blocks)
+
+	if total == 0 || scored == 0 {
+		return 0, 0
+	}
+	return clamp01(weighted / scored), clamp01(scored / total)
 }
 
 // PlainText concatenates every piece of text on a page, walking into lists,

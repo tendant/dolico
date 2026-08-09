@@ -40,6 +40,19 @@ else
     echo "OCR tier: stub (set DOLICO_OCR_URL for real OCR)"
 fi
 
+if [[ "${DOLICO_VISION_ENABLED:-}" == "1" ]]; then
+    # Asking for Tier 3 against a service that does not have it is a two-tier
+    # run with a warning, which would quietly turn the vision assertions into
+    # failures with a confusing cause. Say so here instead.
+    if ! curl -fsS "${DOLICO_OCR_URL:-http://127.0.0.1:8181}/v1/version" \
+        | grep -q '"vision_available":true'; then
+        echo "DOLICO_VISION_ENABLED=1 but the OCR service has no vision tier." >&2
+        echo "Start it with 'make ocr-vision'." >&2
+        exit 1
+    fi
+    echo "Vision tier: enabled"
+fi
+
 echo "Starting dolico on ${BASE} (data: ${DATA_DIR})"
 DOLICO_ADDR="127.0.0.1:${PORT}" DOLICO_DATA_DIR="${DATA_DIR}" ./bin/dolico >"${LOG}" 2>&1 &
 SERVER_PID=$!

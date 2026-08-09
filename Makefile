@@ -1,6 +1,6 @@
 .PHONY: help build build-go build-rust run run-ocr run-vision ocr ocr-text ocr-vision \
-        test test-go test-rust test-ocr lint fmt e2e e2e-ocr bench bench-ocr testdata \
-        clean clean-ocr
+        test test-go test-rust test-ocr lint fmt e2e e2e-ocr e2e-vision bench bench-ocr \
+        bench-vision bench-hard testdata clean clean-ocr
 
 # Caches live inside the repo so a build never depends on, or pollutes, the
 # machine's shared Go cache.
@@ -46,8 +46,11 @@ help:
 	@echo "  bench-ocr   Score extraction with the OCR tier included"
 	@echo ""
 	@echo "Vision tier (optional third tier -- only for pages OCR loses):"
-	@echo "  ocr-vision  Run the OCR service with MinerU installed as well"
-	@echo "  run-vision  Run the API server with the vision escalation enabled"
+	@echo "  ocr-vision   Run the OCR service with MinerU installed as well"
+	@echo "  run-vision   Run the API server with the vision escalation enabled"
+	@echo "  e2e-vision   End-to-end sweep asserting faded.pdf escalated and was recovered"
+	@echo "  bench-vision Score extraction with all three tiers"
+	@echo "  bench-hard   Score the real-scan corpus in testdata/corpus-hard"
 
 build: build-rust build-go
 
@@ -85,6 +88,11 @@ e2e: build
 e2e-ocr: build
 	@DOLICO_OCR_URL=$(OCR_URL) DOLICO_EXPECT_OCR=$(EXPECT_OCR) ./scripts/e2e.sh
 
+# Requires a service started with `make ocr-vision`.
+e2e-vision: build
+	@DOLICO_OCR_URL=$(OCR_URL) DOLICO_EXPECT_OCR=$(EXPECT_OCR) \
+		DOLICO_VISION_ENABLED=1 DOLICO_EXPECT_VISION=1 ./scripts/e2e.sh
+
 # Scores extraction against testdata/ground-truth.json on a cold cache. Set
 # DOLICO_OCR_URL to include the OCR tier; without it, scanned pages score as
 # total failures because the stub does not read them.
@@ -93,6 +101,24 @@ bench: build
 
 bench-ocr: build
 	@DOLICO_OCR_URL=$(OCR_URL) ./scripts/bench.sh $(BENCH_ARGS)
+
+# The pair that gives Tier 3 a number: run this against `make bench-ocr` on the
+# same corpus and compare the faded.pdf row.
+bench-vision: build
+	@DOLICO_OCR_URL=$(OCR_URL) DOLICO_VISION_ENABLED=1 ./scripts/bench.sh $(BENCH_ARGS)
+
+# Real scans, whose ground truth is transcribed rather than generated. Kept out
+# of the default corpus for exactly that reason.
+#
+# The thresholds are forced because the real scan does not trip the real ones:
+# PaddleOCR misreads that page and reports 0.938 confidence, so it scores about
+# 0.61 and Tier 3 is never called. This run measures what the vision tier can
+# recover from a real scan, not what the pipeline would do with one -- see
+# testdata/corpus-hard/PROVENANCE.md.
+bench-hard: build
+	@DOLICO_OCR_URL=$(OCR_URL) DOLICO_VISION_ENABLED=1 \
+		DOLICO_OCR_THRESHOLD=0.99 DOLICO_VISION_THRESHOLD=0.98 \
+		./scripts/bench.sh --corpus testdata/corpus-hard $(BENCH_ARGS)
 
 testdata:
 	@./scripts/gen-testdata.py

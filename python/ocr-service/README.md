@@ -127,7 +127,14 @@ Two differences from the OCR tiers are worth knowing:
 Two things both OCR tiers provide that no other engine in the pipeline can:
 
 - **Real per-block confidence.** A native parser reading DOCX XML is not "95%
-  confident"; it is reading a data structure. OCR genuinely is.
+  confident"; it is reading a data structure. OCR genuinely is — and the router
+  scores an OCR page by that number, because none of the signals computable
+  from the text can tell a good read from a confident misread.
+
+  It is worth knowing how far that goes. On `testdata/corpus-hard/radio-1922.pdf`,
+  a real microfilm scan, Tier 2 gets 54% of the words wrong and reports **0.938
+  confidence**. Low confidence means the page is bad; high confidence does not
+  mean it is good.
 - **Real page geometry.** `pdf-inspector` does not expose page dimensions, so
   natively-extracted PDF pages carry none. This service renders, so it knows.
 

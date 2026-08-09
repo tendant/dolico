@@ -33,6 +33,23 @@
       }
     ]
   },
+  "faded.pdf": {
+    "pages": [
+      {
+        "number": 1,
+        "text": [
+          "SHIPPING RECEIPT",
+          "Consignment 8842-QX",
+          "Received 14 March 2026",
+          "Freight charge 1,284.50",
+          "Fuel surcharge 96.25",
+          "Handling 40.00",
+          "Total due 1,420.75",
+          "Terms net thirty days"
+        ]
+      }
+    ]
+  },
   "mixed.pdf": {
     "pages": [
       {

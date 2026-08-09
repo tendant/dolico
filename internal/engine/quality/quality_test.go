@@ -21,6 +21,28 @@ func page(text string, confidence float64) canonical.Page {
 	}
 }
 
+// measuredPage is what an OCR tier returns: blocks that report how sure the
+// engine was of the characters it recognized.
+func measuredPage(confidences map[string]float64) canonical.Page {
+	p := canonical.Page{
+		Number: 1,
+		Kind:   canonical.PageKindPaginated,
+		Classification: canonical.Classification{
+			Type: canonical.PageTypeScanned, Confidence: 1.0,
+		},
+	}
+	i := 0
+	for text, conf := range confidences {
+		c := conf
+		p.Blocks = append(p.Blocks, canonical.Block{
+			ID: "p1-ocr" + string(rune('0'+i)), Type: canonical.BlockParagraph,
+			Text: text, Confidence: &c,
+		})
+		i++
+	}
+	return p
+}
+
 func TestCleanProseScoresHigh(t *testing.T) {
 	p := page(strings.Repeat("The quarterly report shows steady growth across every region. ", 8), 1.0)
 	q := Score(&p, DefaultWeights)
@@ -155,5 +177,139 @@ func TestZeroWeightsDoNotDivideByZero(t *testing.T) {
 	q := Score(&p, Weights{})
 	if q.Score < 0 || q.Score > 1 {
 		t.Errorf("score with zero weights = %.3f, outside 0..1", q.Score)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Measured confidence
+//
+// The failure these cover is the one the text signals structurally cannot see:
+// OCR that returns well-formed, word-shaped, damage-free text that happens to
+// be wrong. Nothing about "Rcglon Unlts Rcvcnuc" is detectable without either
+// a dictionary or the engine's own uncertainty.
+// ---------------------------------------------------------------------------
+
+func TestAConfidentMisreadCanFallBelowTheVisionThreshold(t *testing.T) {
+	// Word-shaped, no damage, no replacement characters -- and wrong.
+	p := measuredPage(map[string]float64{
+		"Rcglon Unlts Rcvcnuc Nortb l2O l4,4OO.OO Soutb 8b lO,32O.OO": 0.42,
+	})
+	q := Score(&p, DefaultWeights)
+	if q.WordRatio < 0.9 {
+		t.Fatalf("word ratio = %.3f; the point of this case is that the text looks fine", q.WordRatio)
+	}
+	if q.Score >= 0.35 {
+		t.Errorf("score = %.3f; a page the engine was 42%% sure of should reach the vision tier (%+v)",
+			q.Score, q)
+	}
+}
+
+func TestAConfidentGoodReadStaysHigh(t *testing.T) {
+	p := measuredPage(map[string]float64{
+		strings.Repeat("Region Units Revenue North 120 14,400.00 ", 12): 0.97,
+	})
+	q := Score(&p, DefaultWeights)
+	if q.Score < 0.9 {
+		t.Errorf("score = %.3f; a page read well and confidently should not escalate (%+v)", q.Score, q)
+	}
+}
+
+// The whole reason the branch exists: as a weighted term, engine confidence
+// cannot pull any page with text below 0.55, so no threshold under the 0.60
+// OCR bar could ever select one.
+func TestConfidenceIsDecisiveNotAdvisory(t *testing.T) {
+	unsure := measuredPage(map[string]float64{"Ordinary looking words on a page here": 0.20})
+	sure := measuredPage(map[string]float64{"Ordinary looking words on a page here": 0.99})
+
+	uq, sq := Score(&unsure, DefaultWeights), Score(&sure, DefaultWeights)
+	if ratio := uq.Score / sq.Score; ratio > 0.3 {
+		t.Errorf("unsure %.3f vs sure %.3f: confidence barely moved the score", uq.Score, sq.Score)
+	}
+}
+
+// Length-weighted, so one bad line among many good ones is not a bad page.
+func TestOneBadLineDoesNotCondemnAPage(t *testing.T) {
+	p := measuredPage(map[string]float64{
+		strings.Repeat("This line was read cleanly and at length. ", 8): 0.98,
+		"snlppet":                                                       0.20,
+	})
+	q := Score(&p, DefaultWeights)
+	if q.Score < 0.8 {
+		t.Errorf("score = %.3f; one short bad line should barely move a page of good text (%+v)",
+			q.Score, q)
+	}
+}
+
+// A native page reports no per-block confidence, so nothing about its scoring
+// changes -- which is what keeps the 0.60 OCR threshold meaning what it did.
+func TestAPageWithNoMeasurementIsScoredAsBefore(t *testing.T) {
+	p := page(strings.Repeat("The quarterly report shows steady growth. ", 12), 1.0)
+	q := Score(&p, DefaultWeights)
+	if q.MeasuredConfidence != nil {
+		t.Errorf("a page whose blocks report nothing should carry no measurement: %+v", q)
+	}
+	// The old formula: density 1, no replacements, all words, confidence 1.
+	if q.Score < 0.99 {
+		t.Errorf("score = %.3f, want the unchanged additive result", q.Score)
+	}
+}
+
+// Below the coverage bar the mean describes a sliver, not the page.
+func TestASliverOfMeasuredTextDoesNotScoreThePage(t *testing.T) {
+	conf := 0.10
+	p := page(strings.Repeat("Ordinary readable text extracted from the document. ", 8), 1.0)
+	p.Blocks = append(p.Blocks, canonical.Block{
+		ID: "p1-b1", Type: canonical.BlockParagraph, Text: "cptn", Confidence: &conf,
+	})
+
+	q := Score(&p, DefaultWeights)
+	if q.MeasuredCoverage >= MeasuredCoverage {
+		t.Fatalf("coverage = %.3f; this case needs it below the bar", q.MeasuredCoverage)
+	}
+	if q.Score < 0.9 {
+		t.Errorf("score = %.3f; a four-character caption should not condemn the page (%+v)", q.Score, q)
+	}
+	// It is still reported, because it is true and a consumer may want it.
+	if q.MeasuredConfidence == nil || *q.MeasuredConfidence != conf {
+		t.Errorf("the measurement should be recorded even when unused: %+v", q)
+	}
+}
+
+// Text inside tables is where a scanned table's characters live, so the
+// measurement has to walk into them or a table page looks unmeasured.
+func TestMeasurementWalksIntoTables(t *testing.T) {
+	conf := 0.30
+	cell := func(text string) canonical.Cell {
+		return canonical.Cell{RowSpan: 1, ColSpan: 1, Blocks: []canonical.Block{{
+			ID: "c", Type: canonical.BlockParagraph, Text: text, Confidence: &conf,
+		}}}
+	}
+	p := canonical.Page{
+		Number:         1,
+		Classification: canonical.Classification{Type: canonical.PageTypeScanned, Confidence: 1},
+		Blocks: []canonical.Block{{
+			ID: "p1-t0", Type: canonical.BlockTable,
+			Table: &canonical.Table{Grid: [][]canonical.Cell{
+				{cell("Rcglon"), cell("Unlts")},
+				{cell("Nortb"), cell("l2O")},
+			}},
+		}},
+	}
+
+	q := Score(&p, DefaultWeights)
+	if q.MeasuredCoverage < 1 {
+		t.Errorf("coverage = %.3f; every character on this page came from a scored cell", q.MeasuredCoverage)
+	}
+	if q.Score >= 0.35 {
+		t.Errorf("score = %.3f; a table read at 30%% confidence should escalate", q.Score)
+	}
+}
+
+func TestMeasuredScoreStaysInRange(t *testing.T) {
+	for _, conf := range []float64{-1, 0, 0.5, 1, 2} {
+		p := measuredPage(map[string]float64{"some text here": conf})
+		if q := Score(&p, DefaultWeights); q.Score < 0 || q.Score > 1 {
+			t.Errorf("confidence %v gave score %.3f, outside 0..1", conf, q.Score)
+		}
 	}
 }

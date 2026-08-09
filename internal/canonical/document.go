@@ -19,7 +19,11 @@ const SchemaVersion = "1.0"
 // PipelineVersion identifies the orchestration behavior (routing rules,
 // escalation thresholds, block assembly). It participates in cache keys, so
 // bumping it invalidates cached page results without touching engine versions.
-const PipelineVersion = "1"
+// Bumped to 2 when per-page quality began scoring a measured extraction by its
+// measured confidence: the same bytes through the same engines can now escalate
+// differently, so cached pages from version 1 are not the pages this pipeline
+// would produce.
+const PipelineVersion = "2"
 
 // Document is the root of the canonical model.
 type Document struct {
@@ -239,6 +243,16 @@ type Quality struct {
 	ReplacementRatio float64  `json:"replacement_ratio"` // share of U+FFFD
 	WordRatio        float64  `json:"word_ratio"`        // share of plausible words
 	EngineConfidence *float64 `json:"engine_confidence,omitempty"`
+	// MeasuredConfidence is the length-weighted mean of the per-block
+	// confidences on this page, present only when blocks reported any. It is
+	// separate from EngineConfidence because the two mean different things: a
+	// parser asserting certainty about a data structure it read, versus an
+	// engine reporting how sure it is of characters it recognized.
+	MeasuredConfidence *float64 `json:"measured_confidence,omitempty"`
+	// MeasuredCoverage is the share of the page's characters that came from
+	// blocks reporting a confidence. A mean over a sliver of a page is not a
+	// statement about the page, so the score only uses it above a threshold.
+	MeasuredCoverage float64 `json:"measured_coverage,omitempty"`
 	// Escalated records that this page was re-extracted by another engine
 	// because the first attempt scored below threshold.
 	Escalated bool `json:"escalated,omitempty"`

@@ -224,11 +224,62 @@ listed "MinerU strategy" as its own V2 item, distinct from the vision fallback.
 based on Apache 2.0 with additional conditions." Worth reading those conditions
 before this ships.
 
-## Parked
+## What the tier is worth, measured
 
-**A fixture that defeats OCR.** The corpus contains no page Tier 2 gets wrong,
-so nothing in it exercises this path end to end — and the escalation threshold
-would never fire on the fixtures we have. This does not block implementation
-(mapping, thresholds, caps and failure paths all test against a forced
-threshold), but without it there is no evidence in the repository that Tier 3
-recovers anything, and no benchmark number for it. To be planned separately.
+Previously parked for want of a fixture. There are two now, and they give the
+tier its first numbers in this repository.
+
+**`testdata/faded.pdf`** — generated, so its ground truth is exact. A shipping
+receipt rendered as an exhausted photocopy: legible to a person, and
+PP-StructureV3 returns a single character from it. Scored by `make bench-ocr`
+against `make bench-vision`:
+
+| | two tiers | three tiers |
+| --- | --- | --- |
+| `faded.pdf` CER | 1.000 | **0.019** |
+| corpus mean CER | 0.1315 | **0.0088** |
+| total wall time | 16.8s | 24.9s |
+
+Tier 3 fires on one page of eight documents and costs 8.1s to do it.
+
+**`testdata/corpus-hard/radio-1922.pdf`** — a real 1922 newspaper column off
+Library of Congress microfilm, transcribed by hand, kept out of the default
+corpus for that reason. It answers whether the generated fixture was only hard
+in a way we invented:
+
+| | CER | WER |
+| --- | --- | --- |
+| Tier 2, `pp-structurev3` | 0.091 | 0.540 |
+| Tier 3, `mineru` | **0.005** | **0.016** |
+
+More than half the words wrong: `11:13` for `11:15`, `4t0` for `4 to`,
+`Ho8nasne` for `Hog flash`. The vision tier misses one letter on the page.
+
+## The escalation trigger is weaker than the tier
+
+The same measurements found the limit, and it is worth stating plainly because
+it is not what this design assumed.
+
+**PaddleOCR reported 0.938 confidence on the page it got 54% of the words wrong
+on.** With the production thresholds that page scores about 0.61 and Tier 3 is
+never called; `make bench-hard` has to force escalation to measure anything.
+The generated fixture escalates on the real defaults only because OCR failed
+*visibly* there — one character at 0.49 confidence.
+
+So the two failure modes are not equally reachable:
+
+| OCR failure | Detectable? | Why |
+| --- | --- | --- |
+| returned nothing | yes | zero characters scores 0 |
+| returned little, unsure | yes | the measured confidence carries the score down |
+| returned plenty, wrong, sure | **no** | every available signal says the page is fine |
+
+The scorer was reworked as part of this work to make the middle row reachable
+at all — before it, no OCR page with text on it could score below 0.55, so no
+threshold under the 0.60 OCR bar could select one. That fix is real and it is
+what makes `faded.pdf` escalate. It does not touch the third row.
+
+Closing that would take a second opinion rather than a better signal: a cheap
+disagreement check between two engines on the same page, or a lexicon, which
+this pipeline has deliberately avoided because it is language-specific. Both
+are larger than a threshold change, and neither is in this design.

@@ -45,8 +45,8 @@ interface and the routing contracts while they were still cheap to change.
 | --- | --- |
 | Per-page PDF classification and routing | Postgres, MinIO, durable jobs |
 | Native extraction for 14 formats + Markdown/text | NATS, distributed workers |
-| Real OCR in two tiers, optional and pluggable | Engine benchmarks over a real corpus |
-| A vision-model third tier for pages OCR loses | A fixture that actually defeats OCR |
+| Real OCR in two tiers, optional and pluggable | Catching OCR that is wrong *and* confident |
+| A vision-model third tier for pages OCR loses | A benchmark corpus larger than one real scan |
 | Layout analysis: scanned tables come back as grids | HTML input |
 | Canonical JSON as the primary API | |
 | Markdown generated as a view | |
@@ -230,11 +230,21 @@ followed by tables. Rather than guess where pages begin, every native document
 becomes a single page of kind `section`. `Page.Kind` records what a "page" means
 for that source.
 
-**Quality scoring is not engine confidence.** A PDF with a broken font encoding
-extracts "text" with complete confidence and produces mojibake. The scorer
-combines text density, replacement-character ratio, and how word-like the output
-is; engine confidence is the smallest of four weights. A page scoring below
+**Asserted confidence is ignored; measured confidence is decisive.** A PDF with
+a broken font encoding extracts "text" with complete confidence and produces
+mojibake — a parser reading a data structure is not 95% sure of anything, and
+it reports no per-block confidence at all. For those pages the score combines
+text density, replacement-character ratio and how word-like the output is, and
+the engine's self-report is the smallest of four weights. A page scoring below
 `DOLICO_OCR_THRESHOLD` is re-extracted by the OCR tier.
+
+OCR is the opposite case: it genuinely measures, per block, and the canonical
+model already records that. So for a page whose text came from blocks reporting
+a confidence, the three text signals become a ceiling that the measurement
+scales down. They have to: OCR emits no U+FFFD, and "Rcglon Unlts" is exactly
+as word-like as "Region Units" to any language-agnostic test, so as a weighted
+term confidence could not pull a page with text below 0.55 however unsure the
+engine was — and every vision threshold is below that.
 
 **The vision tier is the same mechanism, one notch lower.** A page the OCR tier
 produced and that still scores below `DOLICO_VISION_THRESHOLD` (0.35, and
@@ -247,6 +257,15 @@ an empty read the OCR result stands and the page is tagged `vision_failed` or
 `vision_empty`, because a page that scored 0.2 is still worth more than nothing.
 [`docs/vision-tier-design.md`](docs/vision-tier-design.md) records why MinerU
 rather than a hosted vision LLM, and what that choice costs.
+
+**The trigger is weaker than the tier, and the corpus proves it.** On a real
+1922 newspaper scan the OCR tier gets 54% of the words wrong — `11:13` for
+`11:15`, `Ho8nasne` for `Hog flash` — and reports **0.938 confidence** while
+doing it. The vision tier reads the same page at 1.6% word error. But nothing
+in the pipeline can tell: a page that was read *confidently and wrongly* looks
+identical to one read correctly. Escalation catches the page OCR gave up on,
+not the page OCR got wrong. Closing that needs a second opinion, not a better
+threshold.
 
 **OCR parallelism is processes, not threads.** One inference uses about one
 core and scales with neither Paddle's intra-op threading nor Python threads —
@@ -304,11 +323,12 @@ recovery path is missing would trade a small loss for a total one.
 ## Testing
 
 ```bash
-make test      # 48 Rust tests, ~160 Go tests
-make e2e       # HTTP sweep with JSON Schema validation
-make test-ocr  # 141 Python tests, plus the Go client against a live OCR service
-make e2e-ocr   # the sweep again, asserting real OCR read the scanned pages
-make bench-ocr # score extraction against ground truth
+make test       # 48 Rust tests, ~174 Go tests
+make e2e        # HTTP sweep with JSON Schema validation
+make test-ocr   # 141 Python tests, plus the Go client against a live OCR service
+make e2e-ocr    # the sweep again, asserting real OCR read the scanned pages
+make e2e-vision # ...and that faded.pdf escalated to the vision tier and was recovered
+make bench-ocr  # score extraction against ground truth
 ```
 
 ## Benchmarking
@@ -321,20 +341,41 @@ constants it draws from.
 
 ```
 document               pages     CER     WER   cells      ms  engines
-scanned-table.pdf          1   0.013   0.125   0.933    4398  pp-structurev3
-scanned.pdf                1   0.014   0.182    -       2042  pp-structurev3
-text.pdf                   2   0.000   0.000    -          16  pdf-inspector
-mean CER               0.0074   mean cell accuracy 0.9778
+faded.pdf                  1   1.000   1.000    -       2974  pp-structurev3
+scanned-table.pdf          1   0.013   0.125   0.933    7092  pp-structurev3
+scanned.pdf                1   0.014   0.182    -       3339  pp-structurev3
+text.pdf                   2   0.000   0.000    -          24  pdf-inspector
+mean CER               0.1315   mean cell accuracy 0.9778
 ```
 
 It runs against a fresh data directory each time, because the document-level
 cache would otherwise short-circuit the second run and measure nothing.
 
+`faded.pdf` is supposed to look like that. It is the fixture the vision tier
+exists for, and `make bench-vision` is the same run with Tier 3 enabled:
+
+| | `make bench-ocr` | `make bench-vision` |
+| --- | --- | --- |
+| `faded.pdf` CER | 1.000 | **0.019** |
+| mean CER | 0.1315 | **0.0088** |
+| total wall time | 16.8s | 24.9s |
+
 **These numbers say the pipeline is wired correctly, not that OCR is accurate.**
-The fixtures are clean synthetic renderings; photographs of creased paper will
-score far worse. `--corpus /path/to/real/documents` points the same harness at
-a directory of real files with a hand-written `ground-truth.json`, which is what
-would actually settle the model and threshold defaults.
+Most of the fixtures are clean synthetic renderings; photographs of creased
+paper score far worse. `make bench-hard` runs the same harness over
+[`testdata/corpus-hard`](testdata/corpus-hard/PROVENANCE.md) — one real 1922
+newspaper column off Library of Congress microfilm, with hand-transcribed
+ground truth, kept separate precisely because its expectation is transcribed
+rather than generated:
+
+| | CER | WER |
+| --- | --- | --- |
+| Tier 2, `pp-structurev3` | 0.091 | 0.540 |
+| Tier 3, `mineru` | **0.005** | **0.016** |
+
+`--corpus /path/to/real/documents` points the harness at any directory holding
+documents and a `ground-truth.json`, which is what would actually settle the
+model and threshold defaults.
 
 The Go tests for `rustshim` and `api` drive the **real** shim against the
 **real** fixtures — a mock would test nothing that matters about talking to two
@@ -343,9 +384,14 @@ Schema validator runs over produced documents, which is what catches drift
 between `schema/canonical-v1.json` and its Go and Rust mirrors.
 
 Fixtures in `testdata/` are committed and regenerated by
-`scripts/gen-testdata.py` (`make testdata`). The three PDFs are the ones that
-matter: `text.pdf` (all text), `scanned.pdf` (image only, no text operators),
-and `mixed.pdf` (one of each), plus `corrupt.pdf` for the error path.
+`scripts/gen-testdata.py` (`make testdata`). The PDFs are the ones that matter:
+`text.pdf` (all text), `scanned.pdf` (image only, no text operators),
+`mixed.pdf` (one of each), `scanned-table.pdf` (a table drawn as pixels),
+`faded.pdf` (a scan OCR cannot read), plus `corrupt.pdf` for the error path.
+Regenerating the PDFs produces no diff unless something actually changed —
+`invariant=1` keeps reportlab from stamping a timestamp — but the DOCX, XLSX
+and PPTX fixtures still differ on every run, because their libraries write
+times into the package.
 
 ## Next
 
@@ -363,12 +409,13 @@ documents. Point `--corpus` at real scans and the model choice, the escalation
 threshold, and the four weights in `internal/engine/quality` become measurable
 rather than argued.
 
-**A fixture that defeats OCR** is what the vision tier is missing. Tier 3 is
-built, tested and wired, but every fixture in `testdata/` is clean synthetic
-rendering that PP-StructureV3 reads well, so nothing here scores below 0.35 and
-the escalation never fires on the corpus. Until there is a page OCR genuinely
-loses — a photograph, a fax, a bad microfilm scan — the tier's *value* is
-argued rather than measured, even though its *behaviour* is covered by tests.
+**A second opinion** is the next real gap, and the corpus now shows why. The
+escalation catches a page OCR gave up on; it cannot catch a page OCR read
+wrongly at 0.938 confidence, because no signal computable from that page
+disagrees with the engine. The cheap version is to run a second engine on a
+sample of pages and escalate on disagreement rather than on self-doubt — which
+costs a second pass on pages that are probably fine, and is the first thing in
+this pipeline that would need a policy rather than a threshold.
 
 Smaller: HTML input, and the page cache clears wholesale at its limit rather
 than evicting LRU (deliberate, and moot once values live in a real store).

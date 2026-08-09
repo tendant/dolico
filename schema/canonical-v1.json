@@ -206,6 +206,8 @@
         "replacement_ratio": { "type": "number", "minimum": 0, "maximum": 1 },
         "word_ratio": { "type": "number", "minimum": 0, "maximum": 1 },
         "engine_confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+        "measured_confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+        "measured_coverage": { "type": "number", "minimum": 0, "maximum": 1 },
         "escalated": { "type": "boolean" }
       }
     },
