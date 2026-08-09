@@ -1,5 +1,5 @@
 .PHONY: help build build-go build-rust run run-ocr ocr ocr-text test test-go test-rust test-ocr \
-        lint fmt e2e e2e-ocr testdata clean clean-ocr
+        lint fmt e2e e2e-ocr bench bench-ocr testdata clean clean-ocr
 
 # Caches live inside the repo so a build never depends on, or pollutes, the
 # machine's shared Go cache.
@@ -32,6 +32,7 @@ help:
 	@echo "  e2e         End-to-end sweep over testdata/ against a live server"
 	@echo "  lint        go vet + cargo clippy"
 	@echo "  fmt         gofmt + cargo fmt"
+	@echo "  bench       Score extraction against ground truth on a cold cache"
 	@echo "  testdata    Regenerate the binary fixtures in testdata/"
 	@echo "  clean       Remove build output and caches"
 	@echo ""
@@ -41,6 +42,7 @@ help:
 	@echo "  run-ocr     Run the API server wired to an OCR service already running"
 	@echo "  test-ocr    Python tests, plus the Go tests against a live OCR service"
 	@echo "  e2e-ocr     End-to-end sweep with real OCR asserted"
+	@echo "  bench-ocr   Score extraction with the OCR tier included"
 
 build: build-rust build-go
 
@@ -77,6 +79,15 @@ e2e: build
 # Requires an OCR service at $(OCR_URL); start one with `make ocr`.
 e2e-ocr: build
 	@DOLICO_OCR_URL=$(OCR_URL) DOLICO_EXPECT_OCR=$(EXPECT_OCR) ./scripts/e2e.sh
+
+# Scores extraction against testdata/ground-truth.json on a cold cache. Set
+# DOLICO_OCR_URL to include the OCR tier; without it, scanned pages score as
+# total failures because the stub does not read them.
+bench: build
+	@./scripts/bench.sh $(BENCH_ARGS)
+
+bench-ocr: build
+	@DOLICO_OCR_URL=$(OCR_URL) ./scripts/bench.sh $(BENCH_ARGS)
 
 testdata:
 	@./scripts/gen-testdata.py

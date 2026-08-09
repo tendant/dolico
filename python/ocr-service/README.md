@@ -13,13 +13,21 @@ Python installed.
 | --- | --- | --- |
 | Detects | text lines | layout regions: headings, paragraphs, figures, **tables** |
 | A scanned table | 18 loose fragments | a 5×3 grid |
-| Cost per letter page | ~2.4s / ~4.1s | ~3.1s / ~6.9s |
 | Dependencies | base install | `+ paddlex[ocr]` (~150MB) |
 
-Tier 2 is the default whenever its dependencies are installed, because it is
-only about a third more expensive and a table read as flat text is *wrong*
-rather than merely uglier. Tier 1 remains the fallback, and the service says
-loudly at startup when it has fallen back.
+Scored by `make bench-ocr` over the fixture corpus:
+
+| | Tier 1 | Tier 2 |
+| --- | --- | --- |
+| mean CER | 0.0409 | **0.0074** |
+| mean cell accuracy | 0.667 | **0.978** |
+| `scanned-table.pdf` cells | 0.000 — no table found | **0.933** |
+| total wall time | **5.8s** | 8.5s |
+
+Tier 2 is the default whenever its dependencies are installed: it is better on
+both accuracy axes for about 1.5× the time, and a table read as flat text is
+*wrong* rather than merely uglier. Tier 1 remains the fallback, and the service
+says loudly at startup when it has fallen back.
 
 ## Running it
 
@@ -127,19 +135,28 @@ that genuinely contains rotated tables, and check the output when you do.
 
 ### On the default models
 
-PaddleOCR would otherwise choose the `medium` variants. Measured on this
-machine (M-series CPU, letter page at 200 DPI):
+PaddleOCR would otherwise choose the `medium` variants, which take ~17.4s for a
+letter page against the mobile ones' ~2.5s. Between mobile and *server*, scored
+by `make bench-ocr` over the fixture corpus:
 
-| Models | Time per page |
-| --- | --- |
-| `PP-OCRv6_medium` | ~17.4s |
-| `PP-OCRv5_mobile` | ~2.5s |
+| | `PP-OCRv5_mobile` (default) | `PP-OCRv5_server` |
+| --- | --- | --- |
+| mean CER | 0.0074 | **0.0065** |
+| mean cell accuracy | 0.978 | **1.000** |
+| `scanned-table.pdf` CER / cells | 0.013 / 0.933 | **0.000 / 1.000** |
+| `scanned.pdf` CER | **0.014** | 0.029 |
+| total wall time | **8.5s** | 39.2s |
 
-On the repository's `scanned.pdf` fixture the two return character-identical
-text at comparable confidence, which is why `mobile` is the default. That is
-**one clean synthetic page, not a benchmark** — a corpus of real scans may well
-separate them. A deployment that cares more about accuracy than latency should
-measure its own documents and set `DOLICO_OCR_DET_MODEL` / `DOLICO_OCR_REC_MODEL`.
+So the honest summary is narrower than "they are the same". The server models
+read the scanned **table** perfectly where mobile drops a thousands separator
+and one cell; mobile is marginally better on the simple invoice; and mobile is
+**4.6× faster**. Mobile stays the default on that speed, but a deployment whose
+documents are mostly tables should measure its own corpus and set
+`DOLICO_OCR_DET_MODEL` / `DOLICO_OCR_REC_MODEL` to the server variants.
+
+Both columns are three OCR documents of clean synthetic rendering. They
+separate the models on this corpus; they do not predict accuracy on
+photographs of real paper.
 
 The document-level preprocessors are off because each is another model, and the
 pages arriving here have already been identified as scans of ordinary documents

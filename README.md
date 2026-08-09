@@ -269,11 +269,37 @@ service has [its own configuration](python/ocr-service/README.md#configuration).
 ## Testing
 
 ```bash
-make test      # 48 Rust tests, ~110 Go tests
+make test      # 48 Rust tests, ~120 Go tests
 make e2e       # HTTP sweep with JSON Schema validation
-make test-ocr  # 50 Python tests, plus the Go client against a live OCR service
+make test-ocr  # 102 Python tests, plus the Go client against a live OCR service
 make e2e-ocr   # the sweep again, asserting real OCR read the scanned pages
+make bench-ocr # score extraction against ground truth
 ```
+
+## Benchmarking
+
+`make bench` scores extraction against `testdata/ground-truth.json`: character
+and word error rate for text, cell accuracy for tables, wall time per document.
+The fixtures are generated, so the expectation is exact rather than
+transcribed — `scripts/gen-testdata.py` writes the ground truth from the same
+constants it draws from.
+
+```
+document               pages     CER     WER   cells      ms  engines
+scanned-table.pdf          1   0.013   0.125   0.933    4398  pp-structurev3
+scanned.pdf                1   0.014   0.182    -       2042  pp-structurev3
+text.pdf                   2   0.000   0.000    -          16  pdf-inspector
+mean CER               0.0074   mean cell accuracy 0.9778
+```
+
+It runs against a fresh data directory each time, because the document-level
+cache would otherwise short-circuit the second run and measure nothing.
+
+**These numbers say the pipeline is wired correctly, not that OCR is accurate.**
+The fixtures are clean synthetic renderings; photographs of creased paper will
+score far worse. `--corpus /path/to/real/documents` points the same harness at
+a directory of real files with a hand-written `ground-truth.json`, which is what
+would actually settle the model and threshold defaults.
 
 The Go tests for `rustshim` and `api` drive the **real** shim against the
 **real** fixtures — a mock would test nothing that matters about talking to two
@@ -294,11 +320,13 @@ knows where bytes live. It also unlocks partial reprocessing after an engine
 upgrade: the page-level cache key already exists, it just has nowhere durable
 to look.
 
-**A benchmarking harness** is the honest next step for quality. Every default
-here rests on a handful of synthetic fixtures: the OCR model choice, the
-escalation threshold, and the four weights in `internal/engine/quality`. They
-sit in a named struct so a sweep can tune them; nothing has measured them
-against a real corpus.
+**A real corpus** is what the benchmark now needs. The harness exists and has
+already earned its keep — it showed the server OCR models recover a scanned
+table perfectly where the mobile default drops a cell, which contradicted an
+earlier claim that the two were equivalent. But it is scoring seven synthetic
+documents. Point `--corpus` at real scans and the model choice, the escalation
+threshold, and the four weights in `internal/engine/quality` become measurable
+rather than argued.
 
 **A vision-LLM tier** is the design's Tier 3, and the escalation machinery for
 it already exists.

@@ -1,0 +1,239 @@
+{
+  "text.pdf": {
+    "pages": [
+      {
+        "number": 1,
+        "text": [
+          "Quarterly Report",
+          "Revenue grew by twelve percent over the prior quarter.",
+          "Operating costs were flat.",
+          "The outlook for the coming quarter remains positive."
+        ]
+      },
+      {
+        "number": 2,
+        "text": [
+          "Appendix A",
+          "All figures are unaudited.",
+          "Currency is United States dollars."
+        ]
+      }
+    ]
+  },
+  "scanned.pdf": {
+    "pages": [
+      {
+        "number": 1,
+        "text": [
+          "SCANNED INVOICE",
+          "Invoice number 4471",
+          "Amount due 1,250.00",
+          "Due on receipt"
+        ]
+      }
+    ]
+  },
+  "mixed.pdf": {
+    "pages": [
+      {
+        "number": 1,
+        "text": [
+          "Cover Letter",
+          "Please find the signed agreement attached.",
+          "The scanned copy follows on the next page."
+        ]
+      },
+      {
+        "number": 2,
+        "text": [
+          "SIGNED AGREEMENT",
+          "Party A and Party B agree",
+          "Signature on file"
+        ]
+      }
+    ]
+  },
+  "scanned-table.pdf": {
+    "pages": [
+      {
+        "number": 1,
+        "text": [
+          "QUARTERLY SALES",
+          "All figures are unaudited.",
+          "Region",
+          "Units",
+          "Revenue",
+          "North",
+          "120",
+          "14,400.00",
+          "South",
+          "86",
+          "10,320.00",
+          "East",
+          "203",
+          "24,360.00",
+          "West",
+          "54",
+          "6,480.00",
+          "Totals exclude tax."
+        ],
+        "tables": [
+          [
+            [
+              "Region",
+              "Units",
+              "Revenue"
+            ],
+            [
+              "North",
+              "120",
+              "14,400.00"
+            ],
+            [
+              "South",
+              "86",
+              "10,320.00"
+            ],
+            [
+              "East",
+              "203",
+              "24,360.00"
+            ],
+            [
+              "West",
+              "54",
+              "6,480.00"
+            ]
+          ]
+        ]
+      }
+    ]
+  },
+  "sample.csv": {
+    "pages": [
+      {
+        "number": 1,
+        "text": [
+          "region",
+          "units",
+          "revenue",
+          "North",
+          "120",
+          "14400.00",
+          "South",
+          "86",
+          "10320.00",
+          "East",
+          "203",
+          "24360.00",
+          "West",
+          "54",
+          "6480.00"
+        ],
+        "tables": [
+          [
+            [
+              "region",
+              "units",
+              "revenue"
+            ],
+            [
+              "North",
+              "120",
+              "14400.00"
+            ],
+            [
+              "South",
+              "86",
+              "10320.00"
+            ],
+            [
+              "East",
+              "203",
+              "24360.00"
+            ],
+            [
+              "West",
+              "54",
+              "6480.00"
+            ]
+          ]
+        ]
+      }
+    ]
+  },
+  "sample.docx": {
+    "pages": [
+      {
+        "number": 1,
+        "text": [
+          "Engineering Handbook",
+          "This document exercises headings, lists, tables and styling.",
+          "Principles",
+          "Extract natively whenever possible.",
+          "OCR only pages that require OCR.",
+          "Inspect the document.",
+          "Route each page.",
+          "Normalize the result.",
+          "Styling",
+          "Text can be bold, italic, or plain.",
+          "Routing table",
+          "Format",
+          "Engine",
+          "Needs OCR",
+          "DOCX",
+          "anydoc",
+          "no",
+          "Scanned PDF",
+          "paddleocr",
+          "yes",
+          "Spans two columns",
+          "left",
+          "right"
+        ],
+        "tables": [
+          [
+            [
+              "Format",
+              "Engine",
+              "Needs OCR"
+            ],
+            [
+              "DOCX",
+              "anydoc",
+              "no"
+            ],
+            [
+              "Scanned PDF",
+              "paddleocr",
+              "yes"
+            ]
+          ],
+          [
+            [
+              "Spans two columns"
+            ],
+            [
+              "left",
+              "right"
+            ]
+          ]
+        ]
+      }
+    ]
+  },
+  "sample.txt": {
+    "pages": [
+      {
+        "number": 1,
+        "text": [
+          "Plain text carries no markup, and nothing here should be interpreted as any.",
+          "Characters like # and * and | are literal in this file. A line that looks",
+          "like - this is not a list item.",
+          "Indented lines keep their indentation.",
+          "The last paragraph has no trailing newline issues."
+        ]
+      }
+    ]
+  }
+}

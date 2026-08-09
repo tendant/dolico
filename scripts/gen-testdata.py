@@ -27,6 +27,7 @@ recovers the grid.
 """
 
 import io
+import json
 import pathlib
 
 from docx import Document as Docx
@@ -40,6 +41,96 @@ from reportlab.lib.utils import ImageReader
 from reportlab.pdfgen import canvas
 
 OUT = pathlib.Path(__file__).resolve().parent.parent / "testdata"
+
+# ---------------------------------------------------------------------------
+# Fixture content
+#
+# Declared once and used twice: to draw the fixture, and to write the ground
+# truth the benchmark scores against. Because these documents are generated
+# rather than collected, the expected output is known exactly rather than
+# transcribed by hand -- which is what makes a character error rate meaningful
+# on them at all.
+# ---------------------------------------------------------------------------
+
+TEXT_PDF_PAGES = [
+    (
+        "Quarterly Report",
+        [
+            "Revenue grew by twelve percent over the prior quarter.",
+            "Operating costs were flat.",
+            "The outlook for the coming quarter remains positive.",
+        ],
+    ),
+    (
+        "Appendix A",
+        [
+            "All figures are unaudited.",
+            "Currency is United States dollars.",
+        ],
+    ),
+]
+
+SCANNED_LINES = [
+    "SCANNED INVOICE",
+    "",
+    "Invoice number 4471",
+    "Amount due 1,250.00",
+    "Due on receipt",
+]
+
+MIXED_TEXT_PAGE = (
+    "Cover Letter",
+    [
+        "Please find the signed agreement attached.",
+        "The scanned copy follows on the next page.",
+    ],
+)
+
+MIXED_SCANNED_LINES = [
+    "SIGNED AGREEMENT",
+    "",
+    "Party A and Party B agree",
+    "Signature on file",
+]
+
+def flatten(rows) -> list[str]:
+    """Table cells in reading order, for the text expectation."""
+    return [cell for row in rows for cell in row]
+
+
+# sample.csv is hand-written and committed; these are its contents, restated so
+# the ground truth can be generated from one place.
+CSV_ROWS = [
+    ("region", "units", "revenue"),
+    ("North", "120", "14400.00"),
+    ("South", "86", "10320.00"),
+    ("East", "203", "24360.00"),
+    ("West", "54", "6480.00"),
+]
+
+DOCX_ROUTING_TABLE = [
+    ("Format", "Engine", "Needs OCR"),
+    ("DOCX", "anydoc", "no"),
+    ("Scanned PDF", "paddleocr", "yes"),
+]
+
+# A merged cell: the second column of row 0 is a shadow slot, which the
+# benchmark skips, so that row has one cell where the other has two.
+DOCX_MERGED_TABLE = [
+    ("Spans two columns",),
+    ("left", "right"),
+]
+
+TABLE_TITLE = "QUARTERLY SALES"
+TABLE_NOTE = "All figures are unaudited."
+TABLE_FOOTER = "Totals exclude tax."
+TABLE_ROWS = [
+    ("Region", "Units", "Revenue"),
+    ("North", "120", "14,400.00"),
+    ("South", "86", "10,320.00"),
+    ("East", "203", "24,360.00"),
+    ("West", "54", "6,480.00"),
+]
 
 
 def page_image(text: str, size=(1200, 1600)) -> Image.Image:
@@ -77,52 +168,24 @@ def image_page(c: canvas.Canvas, img: Image.Image) -> None:
 
 def write_text_pdf() -> None:
     c = canvas.Canvas(str(OUT / "text.pdf"), pagesize=LETTER)
-    text_page(
-        c,
-        "Quarterly Report",
-        [
-            "Revenue grew by twelve percent over the prior quarter.",
-            "Operating costs were flat.",
-            "The outlook for the coming quarter remains positive.",
-        ],
-    )
-    c.showPage()
-    text_page(
-        c,
-        "Appendix A",
-        [
-            "All figures are unaudited.",
-            "Currency is United States dollars.",
-        ],
-    )
-    c.showPage()
+    for title, body in TEXT_PDF_PAGES:
+        text_page(c, title, body)
+        c.showPage()
     c.save()
 
 
 def write_scanned_pdf() -> None:
     c = canvas.Canvas(str(OUT / "scanned.pdf"), pagesize=LETTER)
-    image_page(
-        c,
-        page_image(
-            "SCANNED INVOICE\n\nInvoice number 4471\nAmount due 1,250.00\nDue on receipt"
-        ),
-    )
+    image_page(c, page_image("\n".join(SCANNED_LINES)))
     c.showPage()
     c.save()
 
 
 def write_mixed_pdf() -> None:
     c = canvas.Canvas(str(OUT / "mixed.pdf"), pagesize=LETTER)
-    text_page(
-        c,
-        "Cover Letter",
-        [
-            "Please find the signed agreement attached.",
-            "The scanned copy follows on the next page.",
-        ],
-    )
+    text_page(c, MIXED_TEXT_PAGE[0], MIXED_TEXT_PAGE[1])
     c.showPage()
-    image_page(c, page_image("SIGNED AGREEMENT\n\nParty A and Party B agree\nSignature on file"))
+    image_page(c, page_image("\n".join(MIXED_SCANNED_LINES)))
     c.showPage()
     c.save()
 
@@ -137,18 +200,12 @@ def table_image(size=(1700, 2200)) -> Image.Image:
     img = Image.new("RGB", size, "white")
     draw = ImageDraw.Draw(img)
 
-    rows = [
-        ("Region", "Units", "Revenue"),
-        ("North", "120", "14,400.00"),
-        ("South", "86", "10,320.00"),
-        ("East", "203", "24,360.00"),
-        ("West", "54", "6,480.00"),
-    ]
+    rows = TABLE_ROWS
     left, top = 200, 400
     col_w, row_h = 380, 120
 
-    draw.text((left, top - 160), "QUARTERLY SALES", fill="black")
-    draw.text((left, top - 100), "All figures are unaudited.", fill="black")
+    draw.text((left, top - 160), TABLE_TITLE, fill="black")
+    draw.text((left, top - 100), TABLE_NOTE, fill="black")
 
     for r in range(len(rows) + 1):
         y = top + r * row_h
@@ -161,7 +218,7 @@ def table_image(size=(1700, 2200)) -> Image.Image:
         for c, value in enumerate(cells):
             draw.text((left + c * col_w + 30, top + r * row_h + 45), value, fill="black")
 
-    draw.text((left, top + row_h * len(rows) + 80), "Totals exclude tax.", fill="black")
+    draw.text((left, top + row_h * len(rows) + 80), TABLE_FOOTER, fill="black")
     return img
 
 
@@ -199,13 +256,7 @@ def write_docx() -> None:
     d.add_heading("Routing table", level=2)
     t = d.add_table(rows=3, cols=3)
     t.style = "Table Grid"
-    for row, cells in enumerate(
-        [
-            ("Format", "Engine", "Needs OCR"),
-            ("DOCX", "anydoc", "no"),
-            ("Scanned PDF", "paddleocr", "yes"),
-        ]
-    ):
+    for row, cells in enumerate(DOCX_ROUTING_TABLE):
         for col, value in enumerate(cells):
             cell = t.cell(row, col)
             cell.text = value
@@ -261,6 +312,105 @@ def write_pptx() -> None:
     prs.save(OUT / "sample.pptx")
 
 
+def write_ground_truth() -> None:
+    """Write what each fixture is supposed to say.
+
+    `scripts/bench.py` scores extraction against this. Because these documents
+    are generated rather than collected, the expectation is exact rather than
+    transcribed, so a character error rate computed against it means something.
+
+    What it does *not* mean is real-world accuracy: these are clean synthetic
+    renderings, not photographs of creased paper. The format is deliberately
+    corpus-agnostic so a directory of real documents with hand-written ground
+    truth can be scored by the same harness.
+    """
+    truth = {
+        "text.pdf": {
+            "pages": [
+                {"number": n, "text": [title, *body]}
+                for n, (title, body) in enumerate(TEXT_PDF_PAGES, start=1)
+            ]
+        },
+        "scanned.pdf": {
+            "pages": [{"number": 1, "text": [ln for ln in SCANNED_LINES if ln]}]
+        },
+        "mixed.pdf": {
+            "pages": [
+                {"number": 1, "text": [MIXED_TEXT_PAGE[0], *MIXED_TEXT_PAGE[1]]},
+                {"number": 2, "text": [ln for ln in MIXED_SCANNED_LINES if ln]},
+            ]
+        },
+        "scanned-table.pdf": {
+            "pages": [
+                {
+                    # In reading order, table contents included: the text score
+                    # measures whether the characters were read, and an
+                    # engine's inability to structure them should not also
+                    # register as a failure to read them.
+                    "number": 1,
+                    "text": [TABLE_TITLE, TABLE_NOTE, *flatten(TABLE_ROWS), TABLE_FOOTER],
+                    # Scored separately, because recovering a grid is a
+                    # different capability that only the layout tier claims.
+                    "tables": [[list(row) for row in TABLE_ROWS]],
+                }
+            ]
+        },
+        "sample.csv": {
+            "pages": [
+                {
+                    "number": 1,
+                    "text": flatten(CSV_ROWS),
+                    "tables": [[list(row) for row in CSV_ROWS]],
+                }
+            ]
+        },
+        "sample.docx": {
+            "pages": [
+                {
+                    "number": 1,
+                    "text": [
+                        "Engineering Handbook",
+                        "This document exercises headings, lists, tables and styling.",
+                        "Principles",
+                        "Extract natively whenever possible.",
+                        "OCR only pages that require OCR.",
+                        "Inspect the document.",
+                        "Route each page.",
+                        "Normalize the result.",
+                        "Styling",
+                        "Text can be bold, italic, or plain.",
+                        "Routing table",
+                        *flatten(DOCX_ROUTING_TABLE),
+                        *flatten(DOCX_MERGED_TABLE),
+                    ],
+                }
+            ]
+        },
+        "sample.txt": {
+            "pages": [
+                {
+                    "number": 1,
+                    "text": [
+                        "Plain text carries no markup, and nothing here should be interpreted as any.",
+                        "Characters like # and * and | are literal in this file. A line that looks",
+                        "like - this is not a list item.",
+                        "Indented lines keep their indentation.",
+                        "The last paragraph has no trailing newline issues.",
+                    ],
+                }
+            ]
+        },
+    }
+    # The DOCX tables are expected too: the native path recovers grids as much
+    # as the layout tier does, and a regression there should show up here.
+    truth["sample.docx"]["pages"][0]["tables"] = [
+        [list(row) for row in DOCX_ROUTING_TABLE],
+        [list(row) for row in DOCX_MERGED_TABLE],
+    ]
+    path = OUT / "ground-truth.json"
+    path.write_text(json.dumps(truth, indent=2, ensure_ascii=False) + "\n")
+
+
 def main() -> None:
     OUT.mkdir(parents=True, exist_ok=True)
     write_text_pdf()
@@ -271,6 +421,7 @@ def main() -> None:
     write_docx()
     write_xlsx()
     write_pptx()
+    write_ground_truth()
     for path in sorted(OUT.glob("*")):
         if path.is_file():
             print(f"{path.name:16} {path.stat().st_size:>8} bytes")
