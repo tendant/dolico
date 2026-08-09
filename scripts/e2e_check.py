@@ -77,7 +77,9 @@ def engines_used(doc: dict) -> set[str]:
 
 # Each fixture, and what routing must do with it. The PDFs are the interesting
 # rows: they are what the per-page routing design exists for.
-OCR_ENGINES = {"ocr-stub", "paddleocr"}
+OCR_ENGINES = {"ocr-stub", "paddleocr", "pp-structurev3"}
+# The tiers that actually read pixels, as opposed to the stub.
+REAL_OCR = {"paddleocr", "pp-structurev3"}
 # The OCR engine the assertions expect. Unset means "whichever is wired".
 OCR = EXPECT_OCR or None
 
@@ -97,8 +99,9 @@ CASES = [
     ("text.pdf",       2, {"pdf-inspector"}, OCR_ENGINES),
     # The OCR fixtures are checked separately below, because which engine is
     # acceptable depends on what is wired.
-    ("scanned.pdf",    1, set(),             {"pdf-inspector"}),
-    ("mixed.pdf",      2, {"pdf-inspector"}, set()),
+    ("scanned.pdf",       1, set(),             {"pdf-inspector"}),
+    ("scanned-table.pdf", 1, set(),             {"pdf-inspector"}),
+    ("mixed.pdf",         2, {"pdf-inspector"}, set()),
 ]
 
 
@@ -185,7 +188,7 @@ def main() -> int:
     check("mixed.pdf page 1 was extracted natively", page_engines[0] == ["pdf-inspector"], f"{page_engines}")
     check("mixed.pdf page 2 went to OCR", set(page_engines[1]) <= OCR_ENGINES, f"{page_engines}")
 
-    if OCR == "paddleocr":
+    if OCR in REAL_OCR:
         # Only real OCR can recover text that exists solely as pixels.
         text = " ".join(b.get("text", "") for b in blocks(doc)).upper()
         for word in ("INVOICE", "4471"):
@@ -202,6 +205,58 @@ def main() -> int:
             "the OCR page reports real dimensions",
             page.get("width") and page.get("height"),
             f"width={page.get('width')} height={page.get('height')}",
+        )
+
+    if OCR == "pp-structurev3":
+        # The whole point of Tier 2: a table that exists only as pixels comes
+        # back as a grid, not as loose text.
+        print("\nlayout analysis (scanned-table.pdf)")
+        table_doc = upload("scanned-table.pdf").json()
+        tables = [b for b in blocks(table_doc) if b["type"] == "table"]
+        check("the scanned table was recognized as a table", len(tables) == 1, f"found {len(tables)}")
+        if tables:
+            grid = tables[0]["table"]["grid"]
+            rows = [
+                [
+                    (c["blocks"][0]["text"] if c.get("blocks") else "")
+                    for c in row
+                    if "covered_by" not in c
+                ]
+                for row in grid
+            ]
+            check("the grid is 5 rows by 3 columns", len(grid) == 5 and len(grid[0]) == 3, f"{len(grid)}x{len(grid[0]) if grid else 0}")
+            # Row order and column order both matter: the table orientation
+            # classifier rotates the grid 180 degrees when left enabled, which
+            # puts the header last and reverses the columns.
+            check(
+                "the header row is first and its columns are in order",
+                rows and rows[0] == ["Region", "Units", "Revenue"],
+                f"first row: {rows[0] if rows else None}",
+            )
+            check(
+                "the first data row follows the header",
+                len(rows) > 1 and rows[1][0] == "North",
+                f"second row: {rows[1] if len(rows) > 1 else None}",
+            )
+        labels = [b["provenance"]["method"] for b in blocks(table_doc)]
+        check(
+            "regions are labelled by the layout model",
+            all(m.startswith("pp-structurev3/layout:") for m in labels),
+            f"methods: {sorted(set(labels))}",
+        )
+        # Reading order: the page title must precede the table it introduces.
+        texts = [b.get("text", "") for b in table_doc["pages"][0]["blocks"]]
+        check(
+            "the page title comes before the table",
+            texts and "QUARTERLY" in texts[0].upper(),
+            f"first block text: {texts[0] if texts else None!r}",
+        )
+
+        md = requests.get(f"{BASE}/v1/documents/{table_doc['id']}.md", timeout=30).text
+        check(
+            "the Markdown view renders a real table",
+            "| Region | Units | Revenue |" in md and "| North | 120 |" in md,
+            md[:200],
         )
 
     print("\nerror paths")

@@ -160,19 +160,33 @@ func TestTableRendersWithHeaderAndSeparator(t *testing.T) {
 	}
 }
 
-// GFM has no way to express a table without a header, but degrading the table
-// to paragraphs would lose more.
-func TestHeaderlessTableStillRendersAsATable(t *testing.T) {
+// GFM cannot express a table without a header, so the first row goes in the
+// header position rather than emitting a blank one. The canonical JSON still
+// says header_rows: 0 -- this is a rendering concession, not a model change.
+func TestHeaderlessTablePromotesTheFirstRow(t *testing.T) {
 	cell := func(s string) canonical.Cell {
 		return canonical.Cell{Blocks: []canonical.Block{block(canonical.BlockParagraph, s)}}
 	}
 	b := canonical.Block{ID: "t", Type: canonical.BlockTable, Table: &canonical.Table{
 		HeaderRows: 0,
-		Grid:       [][]canonical.Cell{{cell("a"), cell("b")}},
+		Grid: [][]canonical.Cell{
+			{cell("Region"), cell("Units")},
+			{cell("North"), cell("120")},
+		},
 	}}
 	got := Markdown(doc(section(b)))
-	if !strings.Contains(got, "| --- | --- |") || !strings.Contains(got, "| a | b |") {
-		t.Errorf("got %q", got)
+	if strings.Contains(got, "|  |  |\n") {
+		t.Errorf("an empty header row was emitted: %q", got)
+	}
+	lines := strings.Split(strings.TrimSpace(got), "\n")
+	if lines[0] != "| Region | Units |" {
+		t.Errorf("first line = %q, want the first row promoted", lines[0])
+	}
+	if lines[1] != "| --- | --- |" {
+		t.Errorf("second line = %q, want the separator", lines[1])
+	}
+	if !strings.Contains(got, "| North | 120 |") {
+		t.Errorf("the body row is missing: %q", got)
 	}
 }
 

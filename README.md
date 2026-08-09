@@ -21,7 +21,7 @@ POST /v1/documents ──► blob store (sha256) ──► worker pool
                         │                          ┌───────────────┴───────────────┐
                         │                    text_based                  scanned / image
                         │                          │                              │
-                        │              pdf-inspector extract          PaddleOCR (Python)
+                        │              pdf-inspector extract        PP-StructureV3 (Python)
                         │                          │                              │
                         └──────────────────────────┴──────────────────────────────┘
                                                     │
@@ -45,8 +45,9 @@ interface and the routing contracts while they were still cheap to change.
 | --- | --- |
 | Per-page PDF classification and routing | Postgres, MinIO, durable jobs |
 | Native extraction for 14 formats + Markdown/text | NATS, distributed workers |
-| Real OCR (PaddleOCR), optional and pluggable | PP-StructureV3 layout, vision-LLM fallback |
-| Canonical JSON as the primary API | Engine benchmarks over a real corpus |
+| Real OCR in two tiers, optional and pluggable | Vision-LLM fallback |
+| Layout analysis: scanned tables come back as grids | Engine benchmarks over a real corpus |
+| Canonical JSON as the primary API | Parallel page processing |
 | Markdown generated as a view | HTML input |
 | Bounding boxes, provenance, per-page quality scores | |
 | Content-hash caching at page and document level | |
@@ -85,8 +86,8 @@ curl -F file=@testdata/mixed.pdf 'localhost:8080/v1/documents?wait=true' \
 ```
 
 ```json
-{"page": 1, "class": "text_based", "engine": "pdf-inspector", "score": 0.774}
-{"page": 2, "class": "scanned",    "engine": "paddleocr",     "score": 0.663}
+{"page": 1, "class": "text_based", "engine": "pdf-inspector",  "score": 0.774}
+{"page": 2, "class": "scanned",    "engine": "pp-structurev3", "score": 0.663}
 ```
 
 Page 2 also comes back with something page 1 lacks — real page dimensions and a
@@ -97,6 +98,22 @@ native path does not:
 {"page": 2, "width": 612, "height": 792,
  "blocks": [{"text": "SIGNED AGREEMENT", "confidence": 0.993,
              "bbox": {"x": 60, "y": 726, "width": 52, "height": 7}}]}
+```
+
+And a table that exists only as pixels comes back as a table:
+
+```bash
+curl -F file=@testdata/scanned-table.pdf 'localhost:8080/v1/documents?wait=true' \
+  | jq -r .id | xargs -I{} curl -s localhost:8080/v1/documents/{}.md
+```
+
+```markdown
+# QUARTERLY SALES
+
+| Region | Units | Revenue |
+| --- | --- | --- |
+| North | 120 | 14,400.00 |
+| South | 86 | 10,320.00 |
 ```
 
 Async, if you would rather not block:

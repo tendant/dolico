@@ -12,8 +12,10 @@ is its third mirror, alongside `internal/canonical/document.go` and
 from __future__ import annotations
 
 from . import ENGINE_NAME, SCHEMA_VERSION
-from .layout import Paragraph
+from .layout import Line, Paragraph
 from .raster import RasteredPage
+from .structure import LayoutBlock
+from .tables import parse_table_html, table_text
 
 
 def block(
@@ -110,16 +112,189 @@ def page_payload(
 
 
 def extract_output(
-    pages: list[dict], engine_version: str, duration_ms: int
+    pages: list[dict], engine_version: str, duration_ms: int, engine: str = ENGINE_NAME
 ) -> dict:
     return {
         "schema_version": SCHEMA_VERSION,
-        "engine": ENGINE_NAME,
+        "engine": engine,
         "engine_version": engine_version,
         "metadata": {"page_count": len(pages)},
         "pages": pages,
         "duration_ms": duration_ms,
     }
+
+
+# ---------------------------------------------------------------------------
+# Tier 2: layout blocks
+# ---------------------------------------------------------------------------
+
+# PP-StructureV3's layout labels, mapped onto canonical block types.
+#
+# Anything unlisted becomes a paragraph, which is the safe default: the text is
+# preserved either way, and the original label always survives in
+# provenance.method, so nothing is lost by not having a mapping for it.
+LABEL_TO_TYPE = {
+    "doc_title": "heading",
+    "title": "heading",
+    "paragraph_title": "heading",
+    "chart_title": "heading",
+    "figure_title": "heading",
+    "table_title": "heading",
+    "table": "table",
+    "figure": "image",
+    "image": "image",
+    "chart": "image",
+    "seal": "image",
+    "formula": "formula",
+    "algorithm": "code",
+}
+
+# Headings get a depth from how prominent the label is. Only the labels that
+# genuinely mean "document title" get level 1.
+LABEL_TO_LEVEL = {"doc_title": 1, "title": 1}
+
+
+def layout_page_payload(
+    page: RasteredPage,
+    blocks: list[LayoutBlock],
+    lines: list[Line],
+    engine_version: str,
+    engine: str,
+) -> dict:
+    """Build a canonical page from layout analysis."""
+    out_blocks: list[dict] = []
+    for index, layout in enumerate(blocks):
+        built = _layout_block(layout, index, page, lines, engine_version, engine)
+        if built is not None:
+            out_blocks.append(built)
+
+    scored = [b["confidence"] for b in out_blocks if b.get("confidence") is not None]
+    confidence = sum(scored) / len(scored) if scored else 0.0
+    reasons = ["ocr", "layout_analysis"] if out_blocks else ["ocr", "no_text_found"]
+
+    return {
+        "number": page.number,
+        "kind": "paginated",
+        "width": round(page.width_pt, 3),
+        "height": round(page.height_pt, 3),
+        "classification": {
+            "type": "scanned",
+            "confidence": round(min(1.0, max(0.0, confidence)), 6),
+            "reasons": reasons,
+        },
+        "blocks": out_blocks,
+    }
+
+
+def _layout_block(
+    layout: LayoutBlock,
+    index: int,
+    page: RasteredPage,
+    lines: list[Line],
+    engine_version: str,
+    engine: str,
+) -> dict | None:
+    block_type = LABEL_TO_TYPE.get(layout.label, "paragraph")
+    block_id = f"p{page.number}-ly{index}"
+    # The model's own label rides along in provenance, so a consumer can tell a
+    # heading that came from `doc_title` from one that came from `table_title`,
+    # and nothing is lost to the mapping above.
+    provenance = {
+        "engine": engine,
+        "engine_version": engine_version,
+        "method": f"pp-structurev3/layout:{layout.label}",
+    }
+
+    out: dict = {"id": block_id, "type": block_type, "provenance": provenance}
+
+    bbox = _bbox(layout.x0, layout.y0, layout.x1, layout.y1, page)
+    if bbox is not None:
+        out["bbox"] = bbox
+
+    if block_type == "table":
+        grid, header_rows = parse_table_html(layout.content)
+        if not grid:
+            return None
+        out["table"] = {
+            "header_rows": header_rows,
+            "kind": "data",
+            "grid": [[_cell(slot, block_id, r, c, provenance) for c, slot in enumerate(row)]
+                     for r, row in enumerate(grid)],
+        }
+        text_for_confidence = table_text(grid)
+    elif block_type == "image":
+        # No crop is extracted, so the block records that a figure is here and
+        # where, without pretending to have its bytes.
+        out["alt"] = layout.label
+        text_for_confidence = ""
+    else:
+        text = " ".join(layout.content.split())
+        if not text:
+            return None
+        out["text"] = text
+        if block_type == "heading":
+            out["level"] = LABEL_TO_LEVEL.get(layout.label, 2)
+        text_for_confidence = text
+
+    confidence = _confidence(layout, lines, text_for_confidence)
+    if confidence is not None:
+        out["confidence"] = round(confidence, 6)
+    return out
+
+
+def _cell(slot: dict, block_id: str, row: int, col: int, provenance: dict) -> dict:
+    if "covered_by" in slot:
+        return {"covered_by": slot["covered_by"]}
+    cell: dict = {
+        "row_span": slot.get("row_span", 1),
+        "col_span": slot.get("col_span", 1),
+    }
+    text = slot.get("text", "")
+    if text:
+        cell["blocks"] = [{
+            "id": f"{block_id}-r{row}c{col}",
+            "type": "paragraph",
+            "text": text,
+            "provenance": provenance,
+        }]
+    return cell
+
+
+def _bbox(x0: float, y0: float, x1: float, y1: float, page: RasteredPage) -> dict | None:
+    left, bottom = page.to_points(x0, y1)
+    right, top = page.to_points(x1, y0)
+    width, height = right - left, top - bottom
+    if width <= 0 or height <= 0:
+        return None
+    return {
+        "x": round(left, 3),
+        "y": round(bottom, 3),
+        "width": round(width, 3),
+        "height": round(height, 3),
+    }
+
+
+def _confidence(layout: LayoutBlock, lines: list[Line], text: str) -> float | None:
+    """How well this region's characters were read.
+
+    Computed from the OCR lines whose centres fall inside the region, weighted
+    by length. The layout model's own score is a different quantity -- how sure
+    it is that a table is a table -- and is only used when no line matched,
+    which is the case for a figure.
+    """
+    inside = [
+        line
+        for line in lines
+        if layout.x0 <= (line.x0 + line.x1) / 2 <= layout.x1
+        and layout.y0 <= (line.y0 + line.y1) / 2 <= layout.y1
+    ]
+    total = sum(len(line.text) for line in inside)
+    if total > 0:
+        return sum(line.confidence * len(line.text) for line in inside) / total
+    if not text:
+        return layout.det_score
+    return layout.det_score
+
 
 
 def error_output(kind: str, message: str) -> dict:

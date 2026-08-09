@@ -15,10 +15,15 @@ script does not touch them.
 
 The PDFs are the interesting ones, because they are what exercise routing:
 
-  text.pdf     every page has real text operators  -> native extraction
-  scanned.pdf  image only, no text operators       -> must route to OCR
-  mixed.pdf    one of each                         -> must route per page
-  corrupt.pdf  a PDF header over garbage           -> must fail cleanly
+  text.pdf           every page has real text operators  -> native extraction
+  scanned.pdf        image only, no text operators       -> must route to OCR
+  mixed.pdf          one of each                         -> must route per page
+  scanned-table.pdf  a ruled table drawn as pixels       -> needs layout analysis
+  corrupt.pdf        a PDF header over garbage           -> must fail cleanly
+
+scanned-table.pdf is the one that separates the OCR tiers: text-line OCR reads
+the cells but returns them as flat paragraphs, and only layout analysis
+recovers the grid.
 """
 
 import io
@@ -122,6 +127,51 @@ def write_mixed_pdf() -> None:
     c.save()
 
 
+def table_image(size=(1700, 2200)) -> Image.Image:
+    """A ruled table drawn as pixels, with no text operators anywhere.
+
+    Deliberately *wired* -- every cell fully bordered -- because that is the
+    case a table-structure model should get right, and because a human reading
+    the rendered page can see immediately whether the recovered grid matches.
+    """
+    img = Image.new("RGB", size, "white")
+    draw = ImageDraw.Draw(img)
+
+    rows = [
+        ("Region", "Units", "Revenue"),
+        ("North", "120", "14,400.00"),
+        ("South", "86", "10,320.00"),
+        ("East", "203", "24,360.00"),
+        ("West", "54", "6,480.00"),
+    ]
+    left, top = 200, 400
+    col_w, row_h = 380, 120
+
+    draw.text((left, top - 160), "QUARTERLY SALES", fill="black")
+    draw.text((left, top - 100), "All figures are unaudited.", fill="black")
+
+    for r in range(len(rows) + 1):
+        y = top + r * row_h
+        draw.line([(left, y), (left + col_w * 3, y)], fill="black", width=3)
+    for c in range(4):
+        x = left + c * col_w
+        draw.line([(x, top), (x, top + row_h * len(rows))], fill="black", width=3)
+
+    for r, cells in enumerate(rows):
+        for c, value in enumerate(cells):
+            draw.text((left + c * col_w + 30, top + r * row_h + 45), value, fill="black")
+
+    draw.text((left, top + row_h * len(rows) + 80), "Totals exclude tax.", fill="black")
+    return img
+
+
+def write_scanned_table_pdf() -> None:
+    c = canvas.Canvas(str(OUT / "scanned-table.pdf"), pagesize=LETTER)
+    image_page(c, table_image())
+    c.showPage()
+    c.save()
+
+
 def write_corrupt_pdf() -> None:
     # A valid header over bytes that are not a PDF body: the shim must report
     # this as malformed rather than panicking or returning an empty document.
@@ -215,6 +265,7 @@ def main() -> None:
     OUT.mkdir(parents=True, exist_ok=True)
     write_text_pdf()
     write_scanned_pdf()
+    write_scanned_table_pdf()
     write_mixed_pdf()
     write_corrupt_pdf()
     write_docx()

@@ -1,4 +1,4 @@
-.PHONY: help build build-go build-rust run run-ocr ocr test test-go test-rust test-ocr \
+.PHONY: help build build-go build-rust run run-ocr ocr ocr-text test test-go test-rust test-ocr \
         lint fmt e2e e2e-ocr testdata clean clean-ocr
 
 # Caches live inside the repo so a build never depends on, or pollutes, the
@@ -14,6 +14,8 @@ OCR_DIR := python/ocr-service
 OCR_HOST ?= 127.0.0.1
 OCR_PORT ?= 8181
 OCR_URL ?= http://$(OCR_HOST):$(OCR_PORT)
+# The tier `make ocr` starts. Use EXPECT_OCR=paddleocr with `make ocr-text`.
+EXPECT_OCR ?= pp-structurev3
 UV ?= uv
 
 help:
@@ -32,7 +34,8 @@ help:
 	@echo "  clean       Remove build output and caches"
 	@echo ""
 	@echo "OCR tier (optional -- without it, scanned pages use the stub):"
-	@echo "  ocr         Run the OCR service on $(OCR_HOST):$(OCR_PORT)"
+	@echo "  ocr         Run the OCR service (layout tier) on $(OCR_HOST):$(OCR_PORT)"
+	@echo "  ocr-text    Run it with text-line OCR only (no layout analysis)"
 	@echo "  run-ocr     Run the API server wired to an OCR service already running"
 	@echo "  test-ocr    Python tests, plus the Go tests against a live OCR service"
 	@echo "  e2e-ocr     End-to-end sweep with real OCR asserted"
@@ -71,7 +74,7 @@ e2e: build
 # Asserts that scanned pages were read by the real engine rather than the stub.
 # Requires an OCR service at $(OCR_URL); start one with `make ocr`.
 e2e-ocr: build
-	@DOLICO_OCR_URL=$(OCR_URL) DOLICO_EXPECT_OCR=paddleocr ./scripts/e2e.sh
+	@DOLICO_OCR_URL=$(OCR_URL) DOLICO_EXPECT_OCR=$(EXPECT_OCR) ./scripts/e2e.sh
 
 testdata:
 	@./scripts/gen-testdata.py
@@ -87,8 +90,13 @@ clean:
 # `make ocr` downloads the PaddleOCR models (~50MB) into ~/.paddlex.
 # ---------------------------------------------------------------------------
 
+# Includes the layout-analysis tier. Use `make ocr-text` for a Tier-1-only run.
 ocr:
-	@$(UV) run --project $(OCR_DIR) uvicorn dolico_ocr.app:app \
+	@$(UV) run --project $(OCR_DIR) --extra structure uvicorn dolico_ocr.app:app \
+		--host $(OCR_HOST) --port $(OCR_PORT)
+
+ocr-text:
+	@DOLICO_OCR_TIER=text $(UV) run --project $(OCR_DIR) uvicorn dolico_ocr.app:app \
 		--host $(OCR_HOST) --port $(OCR_PORT)
 
 run-ocr: build

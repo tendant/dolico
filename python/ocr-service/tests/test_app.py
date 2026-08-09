@@ -46,8 +46,15 @@ class FakeEngine:
 
 @pytest.fixture
 def client(monkeypatch):
+    """A client pinned to Tier 1 with a fake engine.
+
+    The tier is forced because the service now prefers layout analysis
+    whenever its dependencies are installed; without this the fake would be
+    bypassed and every test here would load real models.
+    """
     fake = FakeEngine()
     monkeypatch.setattr(app_module, "engine", fake)
+    monkeypatch.setattr(app_module, "TIER", "text")
     with TestClient(app_module.app) as c:
         c.fake = fake
         yield c
@@ -61,6 +68,7 @@ def test_healthz_reports_readiness_and_models(client):
     body = client.get("/healthz").json()
     assert body["status"] == "ok"
     assert body["engine"] == "paddleocr"
+    assert body["tier"] == "text"
     assert body["schema_version"] == SCHEMA_VERSION
     assert body["models"]["det_model"] == "fake"
 
@@ -69,6 +77,8 @@ def test_version_endpoint(client):
     body = client.get("/v1/version").json()
     assert body["schema_version"] == SCHEMA_VERSION
     assert body["engine_version"] == "fake-1.0"
+    assert body["engine"] == "paddleocr"
+    assert body["tier"] == "text"
 
 
 def test_extract_returns_the_canonical_envelope(client):
@@ -194,6 +204,93 @@ def test_error_envelope_matches_the_shim(client):
     # produced them, so the envelope has to be identical.
     body = client.post("/v1/extract", files={"file": ("e.pdf", b"", "application/pdf")}).json()
     assert set(body) == {"schema_version", "kind", "message"}
+
+
+class FakeStructureEngine:
+    """Returns a heading, a table and a paragraph, like a real page."""
+
+    version = "fake-structure-1.0"
+    loaded = True
+
+    def __init__(self):
+        self.calls = []
+
+    def describe(self):
+        return {"lang": "en", "det_model": "fake", "rec_model": "fake"}
+
+    def load(self):
+        pass
+
+    def read(self, image):
+        from dolico_ocr.structure import LayoutBlock
+
+        self.calls.append(image.shape)
+        blocks = [
+            LayoutBlock("doc_title", "QUARTERLY SALES", 100, 100, 500, 130, None, 0.99),
+            LayoutBlock(
+                "table",
+                "<table><tr><td>Region</td><td>Units</td></tr>"
+                "<tr><td>North</td><td>120</td></tr></table>",
+                100, 200, 500, 400, None, 0.98,
+            ),
+            LayoutBlock("text", "Totals exclude tax.", 100, 450, 400, 480, None, 0.97),
+        ]
+        lines = [
+            Line(text="QUARTERLY SALES", confidence=0.95, x0=110, y0=105, x1=490, y1=125),
+            Line(text="Totals exclude tax.", confidence=0.90, x0=110, y0=455, x1=390, y1=475),
+        ]
+        return blocks, lines
+
+
+@pytest.fixture
+def layout_client(monkeypatch):
+    fake = FakeStructureEngine()
+    monkeypatch.setattr(app_module, "structure", fake)
+    monkeypatch.setattr(app_module, "TIER", "layout")
+    with TestClient(app_module.app) as c:
+        c.fake = fake
+        yield c
+
+
+class TestLayoutTier:
+    def test_healthz_reports_the_layout_tier(self, layout_client):
+        body = layout_client.get("/healthz").json()
+        assert body["tier"] == "layout"
+        assert body["engine"] == "pp-structurev3"
+
+    def test_the_envelope_names_the_layout_engine(self, layout_client):
+        body = layout_client.post(
+            "/v1/extract", files={"file": ("scanned.pdf", pdf(), "application/pdf")}
+        ).json()
+        assert body["engine"] == "pp-structurev3"
+        assert body["engine_version"] == "fake-structure-1.0"
+
+    def test_structure_is_recovered_not_flattened(self, layout_client):
+        body = layout_client.post(
+            "/v1/extract", files={"file": ("scanned.pdf", pdf(), "application/pdf")}
+        ).json()
+        blocks = body["pages"][0]["blocks"]
+        assert [b["type"] for b in blocks] == ["heading", "table", "paragraph"]
+
+        table = blocks[1]["table"]
+        assert table["grid"][0][0]["blocks"][0]["text"] == "Region"
+        assert table["grid"][1][1]["blocks"][0]["text"] == "120"
+
+    def test_layout_blocks_carry_confidence_and_geometry(self, layout_client):
+        body = layout_client.post(
+            "/v1/extract", files={"file": ("scanned.pdf", pdf(), "application/pdf")}
+        ).json()
+        for block in body["pages"][0]["blocks"]:
+            assert 0.0 <= block["confidence"] <= 1.0
+            assert block["bbox"]["width"] > 0
+            assert block["provenance"]["engine"] == "pp-structurev3"
+            assert block["provenance"]["method"].startswith("pp-structurev3/layout:")
+
+    def test_the_page_is_marked_as_layout_analyzed(self, layout_client):
+        body = layout_client.post(
+            "/v1/extract", files={"file": ("scanned.pdf", pdf(), "application/pdf")}
+        ).json()
+        assert "layout_analysis" in body["pages"][0]["classification"]["reasons"]
 
 
 class TestBBoxConversion:

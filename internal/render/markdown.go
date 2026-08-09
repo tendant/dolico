@@ -195,10 +195,14 @@ func writeTable(b *strings.Builder, table *canonical.Table) {
 
 	headerRows := min(table.HeaderRows, len(table.Grid))
 
-	if headerRows == 0 {
-		// GFM requires a header row. An empty one keeps the table a table
-		// rather than degrading it to paragraphs.
-		b.WriteString("|" + strings.Repeat("  |", width) + "\n")
+	// GFM has no way to express a table without a header. Rather than emit an
+	// empty one -- which reads as a table whose headings are blank -- the
+	// first row is rendered in the header position. This is a concession to
+	// the format and stays in the view: the canonical JSON still reports
+	// header_rows as whatever the source actually said, which for a table
+	// recognized from a scan is usually 0.
+	if headerRows == 0 && len(table.Grid) > 0 {
+		headerRows = 1
 	}
 	for i := 0; i < headerRows; i++ {
 		writeRow(table.Grid[i])

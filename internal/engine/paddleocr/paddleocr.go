@@ -29,8 +29,18 @@ import (
 	"github.com/tendant/dolico/internal/engine"
 )
 
-// Name is the engine identifier recorded in block provenance.
+// Name is the fallback engine identifier, used before the service has told us
+// which tier it is serving.
+//
+// The real name comes from the service, because it depends on the tier:
+// "paddleocr" for text-line OCR, "pp-structurev3" for layout analysis. It has
+// to be the actual tier, not a generic label, because it is recorded in block
+// provenance and keyed into the page cache -- switching tiers must invalidate
+// the pages the other one produced.
 const Name = "paddleocr"
+
+// StructureName is the identifier the layout-analysis tier reports.
+const StructureName = "pp-structurev3"
 
 // DefaultTimeout bounds one OCR request. OCR is slow -- seconds per page on
 // CPU, and a multi-page escalation is a multiple of that -- so this is much
@@ -44,6 +54,8 @@ type Engine struct {
 
 	mu      sync.RWMutex
 	version string
+	name    string
+	tier    string
 }
 
 // Option configures the engine.
@@ -80,7 +92,22 @@ func New(baseURL string, opts ...Option) (*Engine, error) {
 	return e, nil
 }
 
-func (e *Engine) Name() string { return Name }
+// Name is the tier the service is actually serving, fixed at construction.
+func (e *Engine) Name() string {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	if e.name == "" {
+		return Name
+	}
+	return e.name
+}
+
+// Tier is "layout" or "text", for diagnostics.
+func (e *Engine) Tier() string {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	return e.tier
+}
 
 // Version is the OCR engine's own version, reported by the service. It
 // participates in cache keys, so upgrading the OCR service invalidates exactly
@@ -102,6 +129,7 @@ type versionResponse struct {
 	ServiceVersion string `json:"service_version"`
 	Engine         string `json:"engine"`
 	EngineVersion  string `json:"engine_version"`
+	Tier           string `json:"tier"`
 }
 
 func (e *Engine) refreshVersion(ctx context.Context) error {
@@ -135,6 +163,10 @@ func (e *Engine) refreshVersion(ctx context.Context) error {
 
 	e.mu.Lock()
 	e.version = payload.EngineVersion
+	if payload.Engine != "" {
+		e.name = payload.Engine
+	}
+	e.tier = payload.Tier
 	e.mu.Unlock()
 	return nil
 }
@@ -207,6 +239,13 @@ func (e *Engine) Extract(ctx context.Context, req *engine.ExtractRequest) (*engi
 		e.mu.Lock()
 		e.version = payload.EngineVersion
 		e.mu.Unlock()
+	}
+	// A tier change mid-run would silently mix layout blocks and text lines
+	// under one cache key, so it is a hard error rather than a surprise.
+	if payload.Engine != "" && payload.Engine != e.Name() {
+		return nil, fmt.Errorf(
+			"paddleocr: the service switched tier from %q to %q; restart dolico to pick it up",
+			e.Name(), payload.Engine)
 	}
 
 	return &engine.ExtractResult{

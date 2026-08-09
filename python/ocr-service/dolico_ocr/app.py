@@ -17,10 +17,12 @@ from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import JSONResponse
 
 from . import ENGINE_NAME, SCHEMA_VERSION, __version__
-from .canonical import error_output, extract_output, page_payload
+from . import structure as structure_mod
+from .canonical import error_output, extract_output, layout_page_payload, page_payload
 from .engine import OCREngine
 from .layout import group_lines
 from .raster import DEFAULT_DPI, RasterError, is_pdf, render_pdf_pages, wrap_image
+from .structure import StructureEngine
 
 logging.basicConfig(
     level=os.environ.get("DOLICO_OCR_LOG_LEVEL", "INFO"),
@@ -28,9 +30,34 @@ logging.basicConfig(
 )
 log = logging.getLogger("dolico_ocr")
 
-engine = OCREngine(lang=os.environ.get("DOLICO_OCR_LANG", "en"))
+LANG = os.environ.get("DOLICO_OCR_LANG", "en")
+
+# Tier 1: text lines. Always available.
+engine = OCREngine(lang=LANG)
+# Tier 2: layout analysis. Preferred when its dependencies are installed,
+# because a scanned table read as flat text is wrong rather than merely
+# uglier, and it costs only about a third more per page.
+structure = StructureEngine(lang=LANG)
+
+# "layout" | "text" | "auto". Auto uses Tier 2 when it is installable.
+TIER = os.environ.get("DOLICO_OCR_TIER", "auto").strip().lower()
 
 MAX_UPLOAD_BYTES = int(os.environ.get("DOLICO_OCR_MAX_UPLOAD_BYTES", 256 << 20))
+
+
+def _use_structure() -> bool:
+    if TIER == "text":
+        return False
+    if TIER == "layout":
+        return True
+    return structure_mod.available()
+
+
+def active_engine():
+    """The tier actually serving requests, and the name it reports."""
+    if _use_structure():
+        return structure, structure_mod.ENGINE_NAME
+    return engine, ENGINE_NAME
 
 
 @asynccontextmanager
@@ -39,7 +66,21 @@ async def lifespan(_: FastAPI):
     # models exist would let the orchestrator route work to a replica that then
     # spends thirty seconds downloading.
     if os.environ.get("DOLICO_OCR_LAZY_LOAD", "").lower() not in {"1", "true", "yes"}:
-        await run_in_threadpool(engine.load)
+        active, name = active_engine()
+        try:
+            await run_in_threadpool(active.load)
+            log.info("serving tier %s", name)
+        except Exception as exc:
+            if active is engine:
+                raise
+            # PP-StructureV3 needs the `paddlex[ocr]` extras. Falling back is
+            # better than refusing to start -- Tier 1 still reads the page --
+            # but it has to be loud, because the difference shows up as tables
+            # silently arriving as flat text.
+            log.error("PP-StructureV3 unavailable, falling back to text-line OCR: %s", exc)
+            log.error("install it with: uv sync --extra structure")
+            globals()["TIER"] = "text"
+            await run_in_threadpool(engine.load)
     yield
 
 
@@ -48,27 +89,36 @@ app = FastAPI(title="Dolico OCR", version=__version__, lifespan=lifespan)
 
 @app.get("/healthz")
 def healthz() -> JSONResponse:
-    ready = engine.loaded
+    active, name = active_engine()
+    ready = active.loaded
     return JSONResponse(
         status_code=200 if ready else 503,
         content={
             "status": "ok" if ready else "loading",
-            "engine": ENGINE_NAME,
-            "engine_version": engine.version,
+            "engine": name,
+            "engine_version": active.version,
+            "tier": "layout" if active is structure else "text",
+            "structure_available": structure_mod.available(),
             "schema_version": SCHEMA_VERSION,
             "service_version": __version__,
-            "models": engine.describe(),
+            "models": active.describe(),
         },
     )
 
 
 @app.get("/v1/version")
 def version() -> dict:
+    active, name = active_engine()
     return {
         "schema_version": SCHEMA_VERSION,
         "service_version": __version__,
-        "engine": ENGINE_NAME,
-        "engine_version": engine.version,
+        # The engine name follows the tier, so the orchestrator records the
+        # right thing in provenance and keys its cache on it: upgrading from
+        # text-line OCR to layout analysis must invalidate the pages the old
+        # tier produced.
+        "engine": name,
+        "engine_version": active.version,
+        "tier": "layout" if active is structure else "text",
     }
 
 
@@ -111,20 +161,33 @@ async def extract(
     if not rendered:
         return _error(422, "malformed", "no requested page exists in this document")
 
+    active, name = active_engine()
     pages_out = []
     for page in rendered:
-        lines = await run_in_threadpool(engine.read, page.image)
-        paragraphs = group_lines(lines)
-        pages_out.append(page_payload(page, paragraphs, engine.version))
-        log.info(
-            "ocr page=%d lines=%d paragraphs=%d",
-            page.number,
-            len(lines),
-            len(paragraphs),
-        )
+        if active is structure:
+            blocks, lines = await run_in_threadpool(active.read, page.image)
+            pages_out.append(
+                layout_page_payload(page, blocks, lines, active.version, name)
+            )
+            log.info(
+                "layout page=%d regions=%d labels=%s",
+                page.number,
+                len(blocks),
+                [b.label for b in blocks],
+            )
+        else:
+            lines = await run_in_threadpool(active.read, page.image)
+            paragraphs = group_lines(lines)
+            pages_out.append(page_payload(page, paragraphs, active.version))
+            log.info(
+                "ocr page=%d lines=%d paragraphs=%d",
+                page.number,
+                len(lines),
+                len(paragraphs),
+            )
 
     duration_ms = int((time.monotonic() - started) * 1000)
-    return JSONResponse(extract_output(pages_out, engine.version, duration_ms))
+    return JSONResponse(extract_output(pages_out, active.version, duration_ms, engine=name))
 
 
 def _render(data: bytes, pages: list[int] | None, dpi: int):

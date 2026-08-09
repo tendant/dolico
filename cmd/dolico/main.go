@@ -158,7 +158,12 @@ func ocrEngine(cfg *config.Config, log *slog.Logger) (engine.Engine, error) {
 		// otherwise. Refusing to start is the honest failure.
 		return nil, fmt.Errorf("%w\nstart it with: make ocr", err)
 	}
-	log.Info("OCR tier connected", "url", ocr.BaseURL(), "version", ocr.Version())
+	log.Info("OCR tier connected",
+		"url", ocr.BaseURL(), "engine", ocr.Name(), "tier", ocr.Tier(), "version", ocr.Version())
+	if ocr.Tier() == "text" {
+		log.Warn("OCR is running text-line only: scanned tables will arrive as flat text. " +
+			"Install the layout tier with `uv sync --extra structure` in python/ocr-service")
+	}
 	return ocr, nil
 }
 
