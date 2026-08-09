@@ -24,9 +24,10 @@ loudly at startup when it has fallen back.
 ## Running it
 
 ```bash
-make ocr        # from the repository root; layout tier, on 127.0.0.1:8181
-make ocr-text   # text-line tier only
-make run-ocr    # the API server, wired to whichever is running
+make ocr                 # from the repository root; layout tier, on 127.0.0.1:8181
+make ocr OCR_WORKERS=4   # four pages at once -- see Concurrency for the memory cost
+make ocr-text            # text-line tier only
+make run-ocr             # the API server, wired to whichever is running
 ```
 
 The first start downloads models into `~/.paddlex` — about 50MB for Tier 1 and
@@ -95,6 +96,7 @@ Two things both OCR tiers provide that no other engine in the pipeline can:
 | Variable | Default | |
 | --- | --- | --- |
 | `DOLICO_OCR_TIER` | `auto` | `auto`, `layout` or `text` |
+| `DOLICO_OCR_WORKERS` | `1` | worker count reported to the client; set it to match `uvicorn --workers` |
 | `DOLICO_OCR_LANG` | `en` | recognition language |
 | `DOLICO_OCR_DET_MODEL` | `PP-OCRv5_mobile_det` | text detection model |
 | `DOLICO_OCR_REC_MODEL` | `PP-OCRv5_mobile_rec` | text recognition model |
@@ -145,10 +147,42 @@ by `pdf-inspector`. Turn them on for photographed or skewed sources.
 
 ## Concurrency
 
-PaddleOCR's predictor is not safe to call from several threads, so every
-prediction is serialized behind a lock. This service is one-inference-at-a-time
-by construction; scale it with replicas rather than threads, which is also what
-a GPU deployment wants.
+One inference uses **about one core** and does not get faster with more.
+Measured on a 16-core M-series machine, a letter page at 200 DPI:
+
+| | Result |
+| --- | --- |
+| CPU during inference | ~105% of 1600% available |
+| Paddle intra-op threads (1 / 4 / 8) | 1.76s / 1.76s / 1.76s — no scaling |
+| 4 engine instances across 4 Python threads | **1.00×** — Paddle holds the GIL |
+
+So threads are useless here and throughput comes from **processes**:
+
+```bash
+make ocr OCR_WORKERS=4
+```
+
+The service reports its worker count at `/v1/version` and the Go client sets
+its request concurrency to match, so there is no second setting to keep in
+sync. It splits a document's OCR pages into at most that many contiguous chunks
+and sends them concurrently — chunks rather than one request per page, because
+each request re-uploads the document.
+
+Measured end to end on a 6-page scan:
+
+| Workers | Wall time | Memory |
+| --- | --- | --- |
+| 1 | 14.1s | 3.1 GB |
+| 4 | 5.8s (**2.4×**) | 12.3 GB |
+
+It falls short of 4× only because six pages over four shards is [2,2,1,1], so
+the critical path is a two-page chunk; the ratio approaches the worker count as
+documents get longer.
+
+**Budget roughly 3GB per worker.** That is the real constraint: the models are
+about 1.5GB and the allocator arenas grow to ~3GB after the first inference,
+then plateau. `OCR_WORKERS` defaults to 1 for that reason — raising it trades
+memory for latency deliberately — and startup costs one model load per worker.
 
 ## Tests
 

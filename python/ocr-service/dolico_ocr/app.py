@@ -44,6 +44,16 @@ TIER = os.environ.get("DOLICO_OCR_TIER", "auto").strip().lower()
 
 MAX_UPLOAD_BYTES = int(os.environ.get("DOLICO_OCR_MAX_UPLOAD_BYTES", 256 << 20))
 
+# How many uvicorn worker processes are serving, reported so the Go client can
+# match its request concurrency without being told separately.
+#
+# Processes, not threads: one inference uses about one core and scales with
+# neither Paddle's intra-op threading nor Python threads -- Paddle holds the
+# GIL throughout, so a thread pool measures at exactly 1.00x. Concurrency
+# therefore costs a whole process, and a process costs 2.5-3GB once its arenas
+# are warm, which is why this defaults to 1 and is opted into deliberately.
+WORKERS = max(1, int(os.environ.get("DOLICO_OCR_WORKERS", "1")))
+
 
 def _use_structure() -> bool:
     if TIER == "text":
@@ -98,6 +108,7 @@ def healthz() -> JSONResponse:
             "engine": name,
             "engine_version": active.version,
             "tier": "layout" if active is structure else "text",
+            "workers": WORKERS,
             "structure_available": structure_mod.available(),
             "schema_version": SCHEMA_VERSION,
             "service_version": __version__,
@@ -119,6 +130,7 @@ def version() -> dict:
         "engine": name,
         "engine_version": active.version,
         "tier": "layout" if active is structure else "text",
+        "workers": WORKERS,
     }
 
 

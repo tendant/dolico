@@ -47,8 +47,9 @@ interface and the routing contracts while they were still cheap to change.
 | Native extraction for 14 formats + Markdown/text | NATS, distributed workers |
 | Real OCR in two tiers, optional and pluggable | Vision-LLM fallback |
 | Layout analysis: scanned tables come back as grids | Engine benchmarks over a real corpus |
-| Canonical JSON as the primary API | Parallel page processing |
-| Markdown generated as a view | HTML input |
+| Canonical JSON as the primary API | HTML input |
+| Markdown generated as a view | |
+| Parallel page OCR across worker processes | |
 | Bounding boxes, provenance, per-page quality scores | |
 | Content-hash caching at page and document level | |
 
@@ -220,6 +221,14 @@ combines text density, replacement-character ratio, and how word-like the output
 is; engine confidence is the smallest of four weights. A page scoring below
 `DOLICO_OCR_THRESHOLD` is re-extracted by the OCR tier.
 
+**OCR parallelism is processes, not threads.** One inference uses about one
+core and scales with neither Paddle's intra-op threading nor Python threads —
+a four-thread pool measures at exactly 1.00×, because Paddle holds the GIL
+throughout. So the Go client shards a document's OCR pages across concurrent
+requests, bounded by the worker count the service reports. On a 6-page scan,
+four workers take 5.8s against 14.1s — at 12.3GB against 3.1GB, which is why
+it is opt-in.
+
 **Caching is keyed per page**, on document hash + engine + engine version +
 pipeline version + configuration. An engine upgrade re-runs only that engine's
 pages. Above it, a document-level short-circuit skips work entirely when the
@@ -250,6 +259,7 @@ tagged `estimated_glyph_widths` in its classification reasons.
 | `DOLICO_MAX_UPLOAD_BYTES` | `256MiB` | per-upload cap |
 | `DOLICO_OCR_URL` | unset | OCR service address; unset means the stub tier |
 | `DOLICO_OCR_TIMEOUT` | `10m` | bound on one OCR request |
+| `DOLICO_OCR_CONCURRENCY` | service's worker count | OCR requests in flight at once |
 
 Setting `DOLICO_OCR_URL` to a service that is not reachable is a startup
 failure, not a silent fallback: a deployment configured for OCR that quietly
@@ -284,16 +294,14 @@ knows where bytes live. It also unlocks partial reprocessing after an engine
 upgrade: the page-level cache key already exists, it just has nowhere durable
 to look.
 
-**PP-StructureV3** is the natural second step. Tier 1 gives text lines grouped
-into paragraphs; Tier 2 would give headings, tables and reading order, which is
-what scanned tables need. It slots in as another engine behind the same
-interface.
+**A benchmarking harness** is the honest next step for quality. Every default
+here rests on a handful of synthetic fixtures: the OCR model choice, the
+escalation threshold, and the four weights in `internal/engine/quality`. They
+sit in a named struct so a sweep can tune them; nothing has measured them
+against a real corpus.
 
-**Tuning the quality weights** matters more now that escalation costs seconds
-of real work. The weights in `internal/engine/quality` are guesses in a named
-struct so a benchmark can sweep them, but nothing has measured them against a
-real corpus — and the same is true of the OCR model choice, where the default
-was picked on a single synthetic fixture.
+**A vision-LLM tier** is the design's Tier 3, and the escalation machinery for
+it already exists.
 
 Smaller: HTML input, and the page cache clears wholesale at its limit rather
 than evicting LRU (deliberate, and moot once values live in a real store).

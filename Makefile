@@ -16,6 +16,8 @@ OCR_PORT ?= 8181
 OCR_URL ?= http://$(OCR_HOST):$(OCR_PORT)
 # The tier `make ocr` starts. Use EXPECT_OCR=paddleocr with `make ocr-text`.
 EXPECT_OCR ?= pp-structurev3
+# OCR worker processes. Each costs 2.5-3GB once warm; see the `ocr` target.
+OCR_WORKERS ?= 1
 UV ?= uv
 
 help:
@@ -91,13 +93,21 @@ clean:
 # ---------------------------------------------------------------------------
 
 # Includes the layout-analysis tier. Use `make ocr-text` for a Tier-1-only run.
+#
+# WORKERS is how many pages can be OCR'd at once. One inference uses about one
+# core and does not thread, so throughput scales with processes -- but each
+# process costs 2.5-3GB once warm, so budget roughly WORKERS x 3GB before
+# raising it. The Go client reads this number from the service and matches its
+# request concurrency to it automatically.
 ocr:
-	@$(UV) run --project $(OCR_DIR) --extra structure uvicorn dolico_ocr.app:app \
-		--host $(OCR_HOST) --port $(OCR_PORT)
+	@DOLICO_OCR_WORKERS=$(OCR_WORKERS) $(UV) run --project $(OCR_DIR) --extra structure \
+		uvicorn dolico_ocr.app:app --host $(OCR_HOST) --port $(OCR_PORT) \
+		--workers $(OCR_WORKERS)
 
 ocr-text:
-	@DOLICO_OCR_TIER=text $(UV) run --project $(OCR_DIR) uvicorn dolico_ocr.app:app \
-		--host $(OCR_HOST) --port $(OCR_PORT)
+	@DOLICO_OCR_TIER=text DOLICO_OCR_WORKERS=$(OCR_WORKERS) \
+		$(UV) run --project $(OCR_DIR) uvicorn dolico_ocr.app:app \
+		--host $(OCR_HOST) --port $(OCR_PORT) --workers $(OCR_WORKERS)
 
 run-ocr: build
 	@DOLICO_ADDR=$(HOST):$(PORT) DOLICO_OCR_URL=$(OCR_URL) ./bin/dolico

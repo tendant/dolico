@@ -39,6 +39,11 @@ type Config struct {
 	// OCRTimeout bounds a single OCR request. OCR is seconds per page, so this
 	// is far more generous than the shim timeout.
 	OCRTimeout time.Duration
+	// OCRConcurrency is how many OCR requests may be in flight at once. Zero
+	// means match the number of worker processes the service reports, which
+	// is almost always right: more requests than workers only queue on the far
+	// side while paying to upload the document again.
+	OCRConcurrency int
 }
 
 // Load reads configuration from the environment, applying defaults.
@@ -73,6 +78,12 @@ func Load() (*Config, error) {
 	}
 	if c.OCRTimeout, err = envDuration("DOLICO_OCR_TIMEOUT", c.OCRTimeout); err != nil {
 		return nil, err
+	}
+	if c.OCRConcurrency, err = envInt("DOLICO_OCR_CONCURRENCY", c.OCRConcurrency); err != nil {
+		return nil, err
+	}
+	if c.OCRConcurrency < 0 {
+		return nil, fmt.Errorf("DOLICO_OCR_CONCURRENCY must not be negative, got %d", c.OCRConcurrency)
 	}
 	maxUpload := c.MaxUploadBytes
 	if maxUpload, err = envInt64("DOLICO_MAX_UPLOAD_BYTES", maxUpload); err != nil {

@@ -151,7 +151,10 @@ func ocrEngine(cfg *config.Config, log *slog.Logger) (engine.Engine, error) {
 	if cfg.OCRURL == "" {
 		return ocrstub.New(), nil
 	}
-	ocr, err := paddleocr.New(cfg.OCRURL, paddleocr.WithTimeout(cfg.OCRTimeout))
+	ocr, err := paddleocr.New(cfg.OCRURL,
+		paddleocr.WithTimeout(cfg.OCRTimeout),
+		paddleocr.WithConcurrency(cfg.OCRConcurrency),
+		paddleocr.WithLogger(log))
 	if err != nil {
 		// Configuring an OCR service and then starting without it would mean
 		// silently serving stub text under a configuration that says
@@ -159,7 +162,8 @@ func ocrEngine(cfg *config.Config, log *slog.Logger) (engine.Engine, error) {
 		return nil, fmt.Errorf("%w\nstart it with: make ocr", err)
 	}
 	log.Info("OCR tier connected",
-		"url", ocr.BaseURL(), "engine", ocr.Name(), "tier", ocr.Tier(), "version", ocr.Version())
+		"url", ocr.BaseURL(), "engine", ocr.Name(), "tier", ocr.Tier(),
+		"version", ocr.Version(), "concurrency", ocr.Concurrency())
 	if ocr.Tier() == "text" {
 		log.Warn("OCR is running text-line only: scanned tables will arrive as flat text. " +
 			"Install the layout tier with `uv sync --extra structure` in python/ocr-service")

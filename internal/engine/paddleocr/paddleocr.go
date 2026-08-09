@@ -15,11 +15,14 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"mime/multipart"
 	"net/http"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -56,6 +59,16 @@ type Engine struct {
 	version string
 	name    string
 	tier    string
+
+	// concurrency is how many extract requests may be in flight at once,
+	// across all documents. It defaults to the number of worker processes the
+	// service reports, because more requests than workers only queue on the
+	// far side while paying to upload the document again.
+	concurrency int
+	sem         chan struct{}
+	log         *slog.Logger
+
+	serviceWorkers int
 }
 
 // Option configures the engine.
@@ -69,6 +82,18 @@ func WithHTTPClient(c *http.Client) Option {
 // WithTimeout sets the per-request timeout.
 func WithTimeout(d time.Duration) Option {
 	return func(e *Engine) { e.client.Timeout = d }
+}
+
+// WithConcurrency overrides how many extract requests run at once. Zero or
+// less means "match the service's worker count", which is the default and
+// almost always the right answer.
+func WithConcurrency(n int) Option {
+	return func(e *Engine) { e.concurrency = n }
+}
+
+// WithLogger sets the logger used for partial-failure warnings.
+func WithLogger(l *slog.Logger) Option {
+	return func(e *Engine) { e.log = l }
 }
 
 // New builds an engine against the service at baseURL and confirms it is
@@ -86,11 +111,27 @@ func New(baseURL string, opts ...Option) (*Engine, error) {
 	for _, opt := range opts {
 		opt(e)
 	}
+	if e.log == nil {
+		e.log = slog.Default()
+	}
 	if err := e.refreshVersion(context.Background()); err != nil {
 		return nil, err
 	}
+	if e.concurrency < 1 {
+		e.concurrency = max(1, e.workers())
+	}
+	e.sem = make(chan struct{}, e.concurrency)
 	return e, nil
 }
+
+func (e *Engine) workers() int {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	return e.serviceWorkers
+}
+
+// Concurrency is how many extract requests this engine will run at once.
+func (e *Engine) Concurrency() int { return e.concurrency }
 
 // Name is the tier the service is actually serving, fixed at construction.
 func (e *Engine) Name() string {
@@ -130,6 +171,7 @@ type versionResponse struct {
 	Engine         string `json:"engine"`
 	EngineVersion  string `json:"engine_version"`
 	Tier           string `json:"tier"`
+	Workers        int    `json:"workers"`
 }
 
 func (e *Engine) refreshVersion(ctx context.Context) error {
@@ -167,6 +209,7 @@ func (e *Engine) refreshVersion(ctx context.Context) error {
 		e.name = payload.Engine
 	}
 	e.tier = payload.Tier
+	e.serviceWorkers = payload.Workers
 	e.mu.Unlock()
 	return nil
 }
@@ -194,7 +237,18 @@ type errorResponse struct {
 	Message string `json:"message"`
 }
 
-// Extract OCRs the requested pages.
+// Extract OCRs the requested pages, spreading them across concurrent requests.
+//
+// OCR is the pipeline's slowest step by a wide margin and it does not
+// parallelize inside the service: one inference occupies about one core, and
+// scales with neither Paddle's intra-op threading nor Python threads. So the
+// only way to use the rest of the machine is to have several worker processes
+// each working on a different page.
+//
+// The pages are split into at most `concurrency` contiguous chunks rather than
+// one request per page: each request re-uploads the document, so few large
+// chunks cost a handful of uploads where many small ones would cost one per
+// page.
 func (e *Engine) Extract(ctx context.Context, req *engine.ExtractRequest) (*engine.ExtractResult, error) {
 	if len(req.Pages) == 0 {
 		// Guard rather than default to "everything": OCR is the expensive
@@ -203,7 +257,91 @@ func (e *Engine) Extract(ctx context.Context, req *engine.ExtractRequest) (*engi
 		return nil, fmt.Errorf("%w: %s extracts named pages only", engine.ErrUnsupported, Name)
 	}
 
-	body, contentType, err := buildForm(req)
+	chunks := shard(req.Pages, e.concurrency)
+	if len(chunks) == 1 {
+		return e.extractOne(ctx, req, chunks[0])
+	}
+
+	type outcome struct {
+		result *engine.ExtractResult
+		err    error
+	}
+	results := make([]outcome, len(chunks))
+	var wg sync.WaitGroup
+	for i, pages := range chunks {
+		wg.Go(func() {
+			select {
+			case e.sem <- struct{}{}:
+				defer func() { <-e.sem }()
+			case <-ctx.Done():
+				results[i] = outcome{err: ctx.Err()}
+				return
+			}
+			res, err := e.extractOne(ctx, req, pages)
+			results[i] = outcome{result: res, err: err}
+		})
+	}
+	wg.Wait()
+
+	merged := &engine.ExtractResult{}
+	var failures []error
+	for i, out := range results {
+		if out.err != nil {
+			failures = append(failures, fmt.Errorf("pages %v: %w", chunks[i], out.err))
+			continue
+		}
+		merged.Pages = append(merged.Pages, out.result.Pages...)
+		merged.Assets = append(merged.Assets, out.result.Assets...)
+		// The wall time is the slowest shard, not the sum: they ran together.
+		merged.DurationMS = max(merged.DurationMS, out.result.DurationMS)
+	}
+
+	if len(failures) == len(chunks) {
+		return nil, errors.Join(failures...)
+	}
+	if len(failures) > 0 {
+		// Some shards succeeded. Returning what they produced beats discarding
+		// it: the router fills the gap with a placeholder page that records
+		// the page was not extracted, which is visible in the output.
+		e.log.Warn("some OCR shards failed",
+			"engine", e.Name(),
+			"failed", len(failures),
+			"of", len(chunks),
+			"error", errors.Join(failures...))
+	}
+
+	sort.Slice(merged.Pages, func(i, j int) bool { return merged.Pages[i].Number < merged.Pages[j].Number })
+	return merged, nil
+}
+
+// shard splits pages into at most n contiguous, near-equal chunks.
+func shard(pages []int, n int) [][]int {
+	if n < 1 {
+		n = 1
+	}
+	if n > len(pages) {
+		n = len(pages)
+	}
+	if n <= 1 {
+		return [][]int{pages}
+	}
+	chunks := make([][]int, 0, n)
+	base, extra := len(pages)/n, len(pages)%n
+	start := 0
+	for i := range n {
+		size := base
+		if i < extra {
+			size++
+		}
+		chunks = append(chunks, pages[start:start+size])
+		start += size
+	}
+	return chunks
+}
+
+// extractOne runs a single request for one set of pages.
+func (e *Engine) extractOne(ctx context.Context, req *engine.ExtractRequest, pages []int) (*engine.ExtractResult, error) {
+	body, contentType, err := buildForm(req, pages)
 	if err != nil {
 		return nil, err
 	}
@@ -260,7 +398,7 @@ func (e *Engine) Extract(ctx context.Context, req *engine.ExtractRequest) (*engi
 // The document is sent by value rather than by path. That costs an upload per
 // OCR call, and buys a service that can run on another host or in another
 // container with no shared volume -- which is where this is going.
-func buildForm(req *engine.ExtractRequest) (io.Reader, string, error) {
+func buildForm(req *engine.ExtractRequest, pages []int) (io.Reader, string, error) {
 	file, err := os.Open(req.Path)
 	if err != nil {
 		return nil, "", fmt.Errorf("paddleocr: cannot read the document: %w", err)
@@ -282,11 +420,11 @@ func buildForm(req *engine.ExtractRequest) (io.Reader, string, error) {
 		return nil, "", fmt.Errorf("paddleocr: %w", err)
 	}
 
-	pages := make([]string, len(req.Pages))
-	for i, p := range req.Pages {
-		pages[i] = strconv.Itoa(p)
+	numbers := make([]string, len(pages))
+	for i, p := range pages {
+		numbers[i] = strconv.Itoa(p)
 	}
-	if err := mw.WriteField("pages", strings.Join(pages, ",")); err != nil {
+	if err := mw.WriteField("pages", strings.Join(numbers, ",")); err != nil {
 		return nil, "", fmt.Errorf("paddleocr: %w", err)
 	}
 	if dpi := req.Config["dpi"]; dpi != "" {

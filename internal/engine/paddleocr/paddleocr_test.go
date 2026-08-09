@@ -4,12 +4,18 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
+	"sort"
+	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -396,6 +402,271 @@ func TestVersionTracksAnUpgradedService(t *testing.T) {
 	if e.Version() != "4.0.0" {
 		t.Errorf("Version = %q, want 4.0.0", e.Version())
 	}
+}
+
+// ---------------------------------------------------------------------------
+// Sharding
+// ---------------------------------------------------------------------------
+
+// shardingService records every request and can be told to be slow, so that
+// concurrency is observable rather than assumed.
+type shardingService struct {
+	mu       sync.Mutex
+	requests [][]string // the `pages` field of each request, in arrival order
+	inFlight int
+	peak     int
+
+	workers  int
+	delay    time.Duration
+	failFor  map[string]bool // pages-field values that should fail
+	engineID string
+}
+
+func (s *shardingService) start(t *testing.T) string {
+	t.Helper()
+	if s.workers == 0 {
+		s.workers = 1
+	}
+	if s.engineID == "" {
+		s.engineID = "pp-structurev3"
+	}
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /v1/version", func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(w, 200, map[string]any{
+			"schema_version": canonical.SchemaVersion,
+			"engine":         s.engineID,
+			"engine_version": "3.7.0",
+			"tier":           "layout",
+			"workers":        s.workers,
+		})
+	})
+	mux.HandleFunc("POST /v1/extract", func(w http.ResponseWriter, r *http.Request) {
+		_ = r.ParseMultipartForm(32 << 20)
+		pages := r.FormValue("pages")
+
+		s.mu.Lock()
+		s.requests = append(s.requests, []string{pages})
+		s.inFlight++
+		s.peak = max(s.peak, s.inFlight)
+		s.mu.Unlock()
+
+		if s.delay > 0 {
+			time.Sleep(s.delay)
+		}
+
+		s.mu.Lock()
+		s.inFlight--
+		s.mu.Unlock()
+
+		if s.failFor[pages] {
+			writeJSON(w, 500, map[string]string{"kind": "internal", "message": "shard exploded"})
+			return
+		}
+		writeJSON(w, 200, pagesResponse(s.engineID, pages))
+	})
+
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	return srv.URL
+}
+
+func (s *shardingService) sentPages() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]string, 0, len(s.requests))
+	for _, r := range s.requests {
+		out = append(out, r[0])
+	}
+	sort.Strings(out)
+	return out
+}
+
+func (s *shardingService) peakConcurrency() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.peak
+}
+
+// pagesResponse echoes back one canonical page per requested page number.
+func pagesResponse(engineID, pagesField string) map[string]any {
+	var pages []any
+	for _, raw := range strings.Split(pagesField, ",") {
+		n, err := strconv.Atoi(strings.TrimSpace(raw))
+		if err != nil {
+			continue
+		}
+		pages = append(pages, map[string]any{
+			"number": n,
+			"kind":   "paginated",
+			"classification": map[string]any{
+				"type": "scanned", "confidence": 0.9,
+			},
+			"blocks": []any{map[string]any{
+				"id": fmt.Sprintf("p%d-ocr0", n), "type": "paragraph",
+				"text": fmt.Sprintf("page %d", n),
+				"provenance": map[string]any{
+					"engine": engineID, "engine_version": "3.7.0",
+					"method": "pp-structurev3/layout:text",
+				},
+			}},
+		})
+	}
+	return map[string]any{
+		"schema_version": canonical.SchemaVersion,
+		"engine":         engineID,
+		"engine_version": "3.7.0",
+		"metadata":       map[string]any{"page_count": len(pages)},
+		"duration_ms":    100,
+		"pages":          pages,
+	}
+}
+
+func TestConcurrencyDefaultsToTheServicesWorkerCount(t *testing.T) {
+	for _, workers := range []int{1, 4} {
+		svc := &shardingService{workers: workers}
+		e, err := paddleocr.New(svc.start(t))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if e.Concurrency() != workers {
+			t.Errorf("with %d workers, concurrency = %d", workers, e.Concurrency())
+		}
+	}
+}
+
+func TestConcurrencyCanBeOverridden(t *testing.T) {
+	svc := &shardingService{workers: 4}
+	e, err := paddleocr.New(svc.start(t), paddleocr.WithConcurrency(2))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if e.Concurrency() != 2 {
+		t.Errorf("concurrency = %d, want 2", e.Concurrency())
+	}
+}
+
+// A service with one worker must keep receiving one request, since extra
+// requests would only queue on the far side while re-uploading the document.
+func TestOneWorkerMeansOneRequest(t *testing.T) {
+	svc := &shardingService{workers: 1}
+	e, _ := paddleocr.New(svc.start(t))
+
+	if _, err := e.Extract(context.Background(), request(t, 1, 2, 3, 4)); err != nil {
+		t.Fatal(err)
+	}
+	if got := svc.sentPages(); !reflect.DeepEqual(got, []string{"1,2,3,4"}) {
+		t.Errorf("requests = %v, want one request for all pages", got)
+	}
+}
+
+func TestPagesAreSpreadAcrossWorkers(t *testing.T) {
+	svc := &shardingService{workers: 4}
+	e, _ := paddleocr.New(svc.start(t))
+
+	res, err := e.Extract(context.Background(), request(t, 1, 2, 3, 4, 5, 6, 7, 8))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := svc.sentPages(); !reflect.DeepEqual(got, []string{"1,2", "3,4", "5,6", "7,8"}) {
+		t.Errorf("requests = %v", got)
+	}
+	// Every page comes back, exactly once, in order.
+	var numbers []int
+	for _, p := range res.Pages {
+		numbers = append(numbers, p.Number)
+	}
+	if !reflect.DeepEqual(numbers, []int{1, 2, 3, 4, 5, 6, 7, 8}) {
+		t.Errorf("pages = %v", numbers)
+	}
+}
+
+// The point of the whole exercise: the requests must actually overlap.
+func TestShardsRunConcurrently(t *testing.T) {
+	svc := &shardingService{workers: 4, delay: 150 * time.Millisecond}
+	e, _ := paddleocr.New(svc.start(t))
+
+	started := time.Now()
+	if _, err := e.Extract(context.Background(), request(t, 1, 2, 3, 4)); err != nil {
+		t.Fatal(err)
+	}
+	elapsed := time.Since(started)
+
+	if peak := svc.peakConcurrency(); peak < 2 {
+		t.Errorf("peak concurrency = %d; the shards did not overlap", peak)
+	}
+	// Four serial 150ms requests would be 600ms.
+	if elapsed > 450*time.Millisecond {
+		t.Errorf("took %s; the shards appear to have run serially", elapsed)
+	}
+}
+
+func TestConcurrencyIsBounded(t *testing.T) {
+	svc := &shardingService{workers: 2, delay: 100 * time.Millisecond}
+	e, _ := paddleocr.New(svc.start(t))
+
+	if _, err := e.Extract(context.Background(), request(t, 1, 2, 3, 4, 5, 6)); err != nil {
+		t.Fatal(err)
+	}
+	if peak := svc.peakConcurrency(); peak > 2 {
+		t.Errorf("peak concurrency = %d, want at most the 2 workers", peak)
+	}
+}
+
+func TestReportedDurationIsTheSlowestShardNotTheSum(t *testing.T) {
+	svc := &shardingService{workers: 4}
+	e, _ := paddleocr.New(svc.start(t))
+
+	res, err := e.Extract(context.Background(), request(t, 1, 2, 3, 4))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Each fake shard reports 100ms; they ran together, so the total is 100.
+	if res.DurationMS != 100 {
+		t.Errorf("duration = %d, want 100 (the slowest shard)", res.DurationMS)
+	}
+}
+
+// A failed shard must not discard the pages the others read.
+func TestPartialShardFailureKeepsTheGoodPages(t *testing.T) {
+	svc := &shardingService{workers: 2, failFor: map[string]bool{"3,4": true}}
+	e, _ := paddleocr.New(svc.start(t), paddleocr.WithLogger(discardLogger()))
+
+	res, err := e.Extract(context.Background(), request(t, 1, 2, 3, 4))
+	if err != nil {
+		t.Fatalf("a partial failure should not fail the whole extraction: %v", err)
+	}
+	var numbers []int
+	for _, p := range res.Pages {
+		numbers = append(numbers, p.Number)
+	}
+	if !reflect.DeepEqual(numbers, []int{1, 2}) {
+		t.Errorf("pages = %v, want the surviving shard's pages", numbers)
+	}
+}
+
+func TestEveryShardFailingIsAnError(t *testing.T) {
+	svc := &shardingService{workers: 2, failFor: map[string]bool{"1,2": true, "3,4": true}}
+	e, _ := paddleocr.New(svc.start(t), paddleocr.WithLogger(discardLogger()))
+
+	if _, err := e.Extract(context.Background(), request(t, 1, 2, 3, 4)); err == nil {
+		t.Fatal("expected an error when no shard succeeded")
+	}
+}
+
+func TestShardedExtractHonorsCancellation(t *testing.T) {
+	svc := &shardingService{workers: 4, delay: 2 * time.Second}
+	e, _ := paddleocr.New(svc.start(t), paddleocr.WithLogger(discardLogger()))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	if _, err := e.Extract(ctx, request(t, 1, 2, 3, 4)); err == nil {
+		t.Fatal("expected cancellation to surface")
+	}
+}
+
+func discardLogger() *slog.Logger {
+	return slog.New(slog.NewTextHandler(io.Discard, nil))
 }
 
 // Runs only when a real OCR service is reachable, so `make test` stays green
