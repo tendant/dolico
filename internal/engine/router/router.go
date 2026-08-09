@@ -26,6 +26,15 @@ type Options struct {
 	// OCRThreshold is the page quality score below which a text-extracted page
 	// is re-extracted by the OCR tier.
 	OCRThreshold float64
+	// VisionThreshold is the second, lower bar: a page whose *OCR* result
+	// still scores below this is escalated again, to the vision tier. It sits
+	// below OCRThreshold on purpose — a page at 0.5 is mediocre but readable,
+	// a page at 0.2 is garbage, and garbage is what Tier 3 is for.
+	VisionThreshold float64
+	// VisionMaxPages bounds how many pages of one document may reach the
+	// vision tier. Tier 3 costs seconds per page, so a wholly unreadable
+	// document must not turn into an unbounded run.
+	VisionMaxPages int
 	// Weights tunes the quality scorer.
 	Weights quality.Weights
 	// Logger receives routing decisions. Required.
@@ -36,6 +45,7 @@ type Options struct {
 type Router struct {
 	registry *engine.Registry
 	ocr      engine.Engine
+	vision   engine.Engine
 	cache    *cache.Cache
 	opts     Options
 }
@@ -50,7 +60,19 @@ func New(reg *engine.Registry, ocr engine.Engine, c *cache.Cache, opts Options) 
 	if opts.Logger == nil {
 		opts.Logger = slog.Default()
 	}
+	if opts.VisionMaxPages <= 0 {
+		opts.VisionMaxPages = 5
+	}
 	return &Router{registry: reg, ocr: ocr, cache: c, opts: opts}
+}
+
+// WithVision attaches the vision tier. A nil engine leaves the router at two
+// tiers, which is the default: Tier 3 is opt-in.
+func (r *Router) WithVision(v engine.Engine) *Router {
+	if v != nil {
+		r.vision = v
+	}
+	return r
 }
 
 // Request is one document to process.
@@ -172,17 +194,26 @@ func (r *Router) Process(ctx context.Context, req Request) (*canonical.Document,
 			default:
 				escalated := intSet(escalate)
 				for _, p := range res.Pages {
-					if prev, ok := byNumber[p.Number]; ok && prev.Quality != nil {
-						q := *prev.Quality
-						q.Escalated = escalated[p.Number]
-						p.Quality = &q
-					}
+					// Score what OCR produced, not what the previous engine
+					// did. Carrying the old score forward would describe text
+					// that is no longer on the page -- and it is the number
+					// the vision tier reads when deciding what to escalate,
+					// so a stale one sends Tier 3 at the wrong pages.
+					q := quality.Score(&p, r.opts.Weights)
+					q.Escalated = escalated[p.Number]
+					p.Quality = &q
 					byNumber[p.Number] = p
 				}
 				doc.Assets = append(doc.Assets, res.Assets...)
 			}
 		}
 	}
+
+	// 5b. Escalate again, to the vision tier, for pages the OCR tier still did
+	//     badly on. This is the same confidence-driven mechanism as step 4,
+	//     one tier down: score what OCR produced and re-run the worst of it
+	//     with an engine of a different kind.
+	r.escalateToVision(ctx, req, todo, byNumber, doc, log)
 
 	// 6. Assemble in page order, filling any gap rather than silently
 	//    returning a document that is missing a page.
@@ -208,6 +239,135 @@ func (r *Router) Process(ctx context.Context, req Request) (*canonical.Document,
 	}
 	doc.Metadata.PageCount = len(doc.Pages)
 	return doc, nil
+}
+
+// escalateToVision re-reads OCR pages that still scored badly.
+//
+// The governing rule is that Tier 3 must never make a page worse: a vision
+// result replaces the OCR one only when the call succeeds, and any failure
+// leaves the OCR result exactly as it was, with the reason recorded on the
+// page so the outcome is visible rather than silent.
+// ocrPages is exactly the set the OCR tier was asked for, passed in rather
+// than inferred from block provenance: the router already knows, and matching
+// on engine names would silently stop working the day a tier is renamed.
+func (r *Router) escalateToVision(
+	ctx context.Context,
+	req Request,
+	ocrPages []int,
+	byNumber map[int]canonical.Page,
+	doc *canonical.Document,
+	log *slog.Logger,
+) {
+	if r.vision == nil || r.opts.VisionThreshold <= 0 || len(ocrPages) == 0 {
+		return
+	}
+
+	type candidate struct {
+		number int
+		score  float64
+	}
+	var candidates []candidate
+	for _, number := range ocrPages {
+		page, ok := byNumber[number]
+		if !ok {
+			continue
+		}
+		// A page that went straight to OCR has not been scored yet — only
+		// natively-extracted pages were scored in step 4 — so score it here
+		// rather than skipping it, which would make the commonest candidate
+		// (a scanned page) unreachable.
+		if page.Quality == nil {
+			q := quality.Score(&page, r.opts.Weights)
+			page.Quality = &q
+			byNumber[number] = page
+		}
+		if page.Quality.Score < r.opts.VisionThreshold {
+			candidates = append(candidates, candidate{number, page.Quality.Score})
+		}
+	}
+	if len(candidates) == 0 {
+		return
+	}
+
+	// Worst first, so that a cap keeps the pages that need it most.
+	sort.Slice(candidates, func(i, j int) bool {
+		if candidates[i].score != candidates[j].score {
+			return candidates[i].score < candidates[j].score
+		}
+		return candidates[i].number < candidates[j].number
+	})
+	dropped := 0
+	if len(candidates) > r.opts.VisionMaxPages {
+		dropped = len(candidates) - r.opts.VisionMaxPages
+		candidates = candidates[:r.opts.VisionMaxPages]
+	}
+
+	pages := make([]int, len(candidates))
+	for i, c := range candidates {
+		pages[i] = c.number
+	}
+	sort.Ints(pages)
+
+	log.Info("escalating to vision",
+		"pages", pages,
+		"threshold", r.opts.VisionThreshold,
+		"engine", r.vision.Name())
+	if dropped > 0 {
+		// Never truncate silently: a document where most pages needed Tier 3
+		// and only some got it is a materially different result.
+		log.Warn("vision page cap reached; some pages keep their OCR result",
+			"cap", r.opts.VisionMaxPages, "dropped", dropped)
+	}
+
+	res, err := r.extract(ctx, r.vision, req, pages, doc)
+	if err != nil {
+		log.Error("vision extraction failed; keeping the OCR results", "pages", pages, "error", err)
+		for _, number := range pages {
+			markPage(byNumber, number, "vision_failed")
+		}
+		return
+	}
+
+	returned := make(map[int]bool, len(res.Pages))
+	for _, page := range res.Pages {
+		prev, ok := byNumber[page.Number]
+		if !ok {
+			continue
+		}
+		if len(page.Blocks) == 0 {
+			// An empty vision result is worse than what we already have.
+			markPage(byNumber, page.Number, "vision_empty")
+			continue
+		}
+		returned[page.Number] = true
+		// Re-score: the page is different text now, and the quality attached
+		// to it must describe what is actually there.
+		q := quality.Score(&page, r.opts.Weights)
+		q.Escalated = true
+		page.Quality = &q
+		page.Classification.Reasons = append(page.Classification.Reasons, "vision_escalated")
+		log.Info("vision replaced an OCR page",
+			"page", page.Number, "was", prev.Quality.Score, "now", q.Score)
+		byNumber[page.Number] = page
+	}
+
+	// Pages the tier simply did not answer for keep their OCR result too.
+	for _, number := range pages {
+		if !returned[number] {
+			markPage(byNumber, number, "vision_failed")
+		}
+	}
+}
+
+// markPage appends a reason to a page without disturbing anything else on it.
+func markPage(byNumber map[int]canonical.Page, number int, reason string) {
+	page, ok := byNumber[number]
+	if !ok {
+		return
+	}
+	page.Classification.Reasons = append(
+		append([]string(nil), page.Classification.Reasons...), reason)
+	byNumber[number] = page
 }
 
 // extract runs one engine over the given pages, consulting the page cache

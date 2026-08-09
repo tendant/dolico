@@ -1,5 +1,6 @@
-.PHONY: help build build-go build-rust run run-ocr ocr ocr-text test test-go test-rust test-ocr \
-        lint fmt e2e e2e-ocr bench bench-ocr testdata clean clean-ocr
+.PHONY: help build build-go build-rust run run-ocr run-vision ocr ocr-text ocr-vision \
+        test test-go test-rust test-ocr lint fmt e2e e2e-ocr bench bench-ocr testdata \
+        clean clean-ocr
 
 # Caches live inside the repo so a build never depends on, or pollutes, the
 # machine's shared Go cache.
@@ -43,6 +44,10 @@ help:
 	@echo "  test-ocr    Python tests, plus the Go tests against a live OCR service"
 	@echo "  e2e-ocr     End-to-end sweep with real OCR asserted"
 	@echo "  bench-ocr   Score extraction with the OCR tier included"
+	@echo ""
+	@echo "Vision tier (optional third tier -- only for pages OCR loses):"
+	@echo "  ocr-vision  Run the OCR service with MinerU installed as well"
+	@echo "  run-vision  Run the API server with the vision escalation enabled"
 
 build: build-rust build-go
 
@@ -122,6 +127,30 @@ ocr-text:
 
 run-ocr: build
 	@DOLICO_ADDR=$(HOST):$(PORT) DOLICO_OCR_URL=$(OCR_URL) ./bin/dolico
+
+# ---------------------------------------------------------------------------
+# Vision tier (Tier 3)
+#
+# The same service on the same port, with MinerU installed alongside PaddleOCR.
+# It is a separate target because the extra is heavy: the install pulls torch,
+# and the first request downloads the MinerU2.5 weights (~2.5GB) into the
+# Hugging Face cache. Budget roughly 8GB of RAM for one vision worker.
+#
+# Nothing else changes for the OCR tiers -- `ocr-vision` is a superset of
+# `ocr`, and the API server only escalates to Tier 3 when asked to.
+# ---------------------------------------------------------------------------
+
+ocr-vision:
+	@DOLICO_OCR_WORKERS=$(OCR_WORKERS) $(UV) run --project $(OCR_DIR) \
+		--extra structure --extra vision \
+		uvicorn dolico_ocr.app:app --host $(OCR_HOST) --port $(OCR_PORT) \
+		--workers $(OCR_WORKERS)
+
+# Requires a service started with `make ocr-vision`; against a plain `make ocr`
+# the server logs that MinerU is absent and runs with two tiers.
+run-vision: build
+	@DOLICO_ADDR=$(HOST):$(PORT) DOLICO_OCR_URL=$(OCR_URL) \
+		DOLICO_VISION_ENABLED=1 ./bin/dolico
 
 test-ocr:
 	@$(UV) run --project $(OCR_DIR) --extra dev pytest -q $(OCR_DIR)

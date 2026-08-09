@@ -31,12 +31,21 @@ type fakeService struct {
 	schemaVersion string
 	engineVersion string
 
+	// visionAvailable is what /v1/version reports for the third tier.
+	visionAvailable bool
+	visionEngine    string
+
 	extractStatus int
 	extractBody   any
+
+	// visionBody, when set, answers requests carrying tier=vision, so a test
+	// can distinguish the two tiers' responses on one service.
+	visionBody any
 
 	// captured from the last extract request
 	gotPages    string
 	gotDPI      string
+	gotTier     string
 	gotFilename string
 	gotFileSize int
 }
@@ -51,11 +60,17 @@ func (f *fakeService) start(t *testing.T) string {
 	}
 
 	mux := http.NewServeMux()
+	if f.visionEngine == "" && f.visionAvailable {
+		f.visionEngine = "mineru"
+	}
+
 	mux.HandleFunc("GET /v1/version", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, 200, map[string]any{
-			"schema_version": f.schemaVersion,
-			"engine":         "paddleocr",
-			"engine_version": f.engineVersion,
+			"schema_version":   f.schemaVersion,
+			"engine":           "paddleocr",
+			"engine_version":   f.engineVersion,
+			"vision_available": f.visionAvailable,
+			"vision_engine":    f.visionEngine,
 		})
 	})
 	mux.HandleFunc("POST /v1/extract", func(w http.ResponseWriter, r *http.Request) {
@@ -65,6 +80,7 @@ func (f *fakeService) start(t *testing.T) string {
 		}
 		f.gotPages = r.FormValue("pages")
 		f.gotDPI = r.FormValue("dpi")
+		f.gotTier = r.FormValue("tier")
 		if file, header, err := r.FormFile("file"); err == nil {
 			defer file.Close()
 			f.gotFilename = header.Filename
@@ -77,6 +93,9 @@ func (f *fakeService) start(t *testing.T) string {
 			status = 200
 		}
 		body := f.extractBody
+		if f.gotTier == "vision" && f.visionBody != nil {
+			body = f.visionBody
+		}
 		if body == nil {
 			body = okResponse(f.schemaVersion, f.engineVersion)
 		}
@@ -420,6 +439,7 @@ type shardingService struct {
 	delay    time.Duration
 	failFor  map[string]bool // pages-field values that should fail
 	engineID string
+	vision   bool // advertise the third tier
 }
 
 func (s *shardingService) start(t *testing.T) string {
@@ -434,11 +454,13 @@ func (s *shardingService) start(t *testing.T) string {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /v1/version", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, 200, map[string]any{
-			"schema_version": canonical.SchemaVersion,
-			"engine":         s.engineID,
-			"engine_version": "3.7.0",
-			"tier":           "layout",
-			"workers":        s.workers,
+			"schema_version":   canonical.SchemaVersion,
+			"engine":           s.engineID,
+			"engine_version":   "3.7.0",
+			"tier":             "layout",
+			"workers":          s.workers,
+			"vision_available": s.vision,
+			"vision_engine":    "mineru",
 		})
 	})
 	mux.HandleFunc("POST /v1/extract", func(w http.ResponseWriter, r *http.Request) {
@@ -463,7 +485,11 @@ func (s *shardingService) start(t *testing.T) string {
 			writeJSON(w, 500, map[string]string{"kind": "internal", "message": "shard exploded"})
 			return
 		}
-		writeJSON(w, 200, pagesResponse(s.engineID, pages))
+		id := s.engineID
+		if r.FormValue("tier") == "vision" {
+			id = paddleocr.VisionName
+		}
+		writeJSON(w, 200, pagesResponse(id, pages))
 	})
 
 	srv := httptest.NewServer(mux)

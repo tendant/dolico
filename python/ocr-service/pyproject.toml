@@ -24,6 +24,11 @@ dev = ["pytest>=8.0", "httpx>=0.27"]
 # installs it, and the service degrades to Tier 1 with a loud log line when it
 # is missing.
 structure = ["paddlex[ocr]>=3.7"]
+# MinerU (Tier 3: the fallback for pages the OCR tiers lose). Much heavier
+# again -- roughly 1GB of packages plus ~8GB of model weights on first run --
+# and it only ever runs on pages that already failed twice, so it is opt-in
+# even relative to the other optional tier. See docs/vision-tier-design.md.
+vision = ["mineru[core]>=2.5"]
 
 [build-system]
 requires = ["hatchling"]

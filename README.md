@@ -45,9 +45,10 @@ interface and the routing contracts while they were still cheap to change.
 | --- | --- |
 | Per-page PDF classification and routing | Postgres, MinIO, durable jobs |
 | Native extraction for 14 formats + Markdown/text | NATS, distributed workers |
-| Real OCR in two tiers, optional and pluggable | Vision-LLM fallback |
-| Layout analysis: scanned tables come back as grids | Engine benchmarks over a real corpus |
-| Canonical JSON as the primary API | HTML input |
+| Real OCR in two tiers, optional and pluggable | Engine benchmarks over a real corpus |
+| A vision-model third tier for pages OCR loses | A fixture that actually defeats OCR |
+| Layout analysis: scanned tables come back as grids | HTML input |
+| Canonical JSON as the primary API | |
 | Markdown generated as a view | |
 | Parallel page OCR across worker processes | |
 | Bounding boxes, provenance, per-page quality scores | |
@@ -74,6 +75,14 @@ With real OCR — two terminals, and `uv` for the Python side:
 make ocr        # OCR service on 127.0.0.1:8181 (first run fetches ~50MB of models)
 make run-ocr    # the API server, wired to it
 make e2e-ocr    # the sweep again, asserting the real engine read the scans
+```
+
+With the vision tier as well — heavier, and only worth starting if you have
+pages OCR loses:
+
+```bash
+make ocr-vision  # the same service, plus MinerU (torch; ~2.5GB of weights)
+make run-vision  # the API server, with escalation to Tier 3 enabled
 ```
 
 ```bash
@@ -175,12 +184,18 @@ with `pypdfium2`, which keeps pdfium's native dependency out of both the Go
 binary and the Rust shim. It answers with the same canonical envelope the shim
 writes, so one code path in Go parses both.
 
+The vision tier lives behind that same service and the same port, reached by a
+`tier=vision` field on the same endpoint. It shares the OCR client's
+concurrency budget rather than getting its own, because it occupies a service
+worker exactly as an OCR request does — a separate budget would oversubscribe
+the service by however many workers it was allowed.
+
 ```
 cmd/dolico/                 API server
 internal/canonical/         the canonical model — the contract everything meets
 internal/engine/            Engine interface + registry
         ├── rustshim/       subprocess transport; native and PDF engines
-        ├── paddleocr/      HTTP client for the OCR tier
+        ├── paddleocr/      HTTP client for the OCR and vision tiers
         ├── ocrstub/        fallback OCR tier when none is configured
         ├── quality/        per-page scoring
         └── router/         the routing policy
@@ -190,7 +205,7 @@ internal/jobs/              in-memory job store + worker pool
 internal/render/            canonical → Markdown
 internal/api/               HTTP handlers
 rust/dolico-rs/             the shim: anydoc + pdf-inspector → canonical JSON
-python/ocr-service/         PaddleOCR over HTTP (see its own README)
+python/ocr-service/         PaddleOCR and MinerU over HTTP (see its own README)
 schema/canonical-v1.json    cross-language source of truth
 ```
 
@@ -220,6 +235,18 @@ extracts "text" with complete confidence and produces mojibake. The scorer
 combines text density, replacement-character ratio, and how word-like the output
 is; engine confidence is the smallest of four weights. A page scoring below
 `DOLICO_OCR_THRESHOLD` is re-extracted by the OCR tier.
+
+**The vision tier is the same mechanism, one notch lower.** A page the OCR tier
+produced and that still scores below `DOLICO_VISION_THRESHOLD` (0.35, and
+validated to be strictly below the OCR threshold) is read again by MinerU. Three
+things keep it from becoming the default tier: it is off unless asked for, it
+sees only pages OCR already handled, and at most `DOLICO_VISION_MAX_PAGES` of
+them per document — worst-scoring first, and the router logs what the cap
+dropped. On success the page is replaced outright and re-scored; on failure or
+an empty read the OCR result stands and the page is tagged `vision_failed` or
+`vision_empty`, because a page that scored 0.2 is still worth more than nothing.
+[`docs/vision-tier-design.md`](docs/vision-tier-design.md) records why MinerU
+rather than a hosted vision LLM, and what that choice costs.
 
 **OCR parallelism is processes, not threads.** One inference uses about one
 core and scales with neither Paddle's intra-op threading nor Python threads —
@@ -260,18 +287,26 @@ tagged `estimated_glyph_widths` in its classification reasons.
 | `DOLICO_OCR_URL` | unset | OCR service address; unset means the stub tier |
 | `DOLICO_OCR_TIMEOUT` | `10m` | bound on one OCR request |
 | `DOLICO_OCR_CONCURRENCY` | service's worker count | OCR requests in flight at once |
+| `DOLICO_VISION_ENABLED` | off | escalate bad OCR pages to the vision tier |
+| `DOLICO_VISION_THRESHOLD` | `0.35` | page quality below which vision is tried |
+| `DOLICO_VISION_MAX_PAGES` | `5` | vision escalations per document |
 
 Setting `DOLICO_OCR_URL` to a service that is not reachable is a startup
 failure, not a silent fallback: a deployment configured for OCR that quietly
 serves stub text would be worse than one that refuses to start. The OCR
 service has [its own configuration](python/ocr-service/README.md#configuration).
 
+`DOLICO_VISION_ENABLED` is the opposite: asking for a tier the service does not
+have is a warning and a two-tier run, not a startup failure. Tier 3 is an
+optional escalation, and refusing to serve documents because an optional
+recovery path is missing would trade a small loss for a total one.
+
 ## Testing
 
 ```bash
-make test      # 48 Rust tests, ~120 Go tests
+make test      # 48 Rust tests, ~160 Go tests
 make e2e       # HTTP sweep with JSON Schema validation
-make test-ocr  # 102 Python tests, plus the Go client against a live OCR service
+make test-ocr  # 141 Python tests, plus the Go client against a live OCR service
 make e2e-ocr   # the sweep again, asserting real OCR read the scanned pages
 make bench-ocr # score extraction against ground truth
 ```
@@ -328,8 +363,12 @@ documents. Point `--corpus` at real scans and the model choice, the escalation
 threshold, and the four weights in `internal/engine/quality` become measurable
 rather than argued.
 
-**A vision-LLM tier** is the design's Tier 3, and the escalation machinery for
-it already exists.
+**A fixture that defeats OCR** is what the vision tier is missing. Tier 3 is
+built, tested and wired, but every fixture in `testdata/` is clean synthetic
+rendering that PP-StructureV3 reads well, so nothing here scores below 0.35 and
+the escalation never fires on the corpus. Until there is a page OCR genuinely
+loses — a photograph, a fax, a bad microfilm scan — the tier's *value* is
+argued rather than measured, even though its *behaviour* is covered by tests.
 
 Smaller: HTML input, and the page cache clears wholesale at its limit rather
 than evicting LRU (deliberate, and moot once values live in a real store).

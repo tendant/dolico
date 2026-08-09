@@ -18,11 +18,19 @@ from fastapi.responses import JSONResponse
 
 from . import ENGINE_NAME, SCHEMA_VERSION, __version__
 from . import structure as structure_mod
-from .canonical import error_output, extract_output, layout_page_payload, page_payload
+from . import vision as vision_mod
+from .canonical import (
+    error_output,
+    extract_output,
+    layout_page_payload,
+    page_payload,
+    vision_page_payload,
+)
 from .engine import OCREngine
 from .layout import group_lines
 from .raster import DEFAULT_DPI, RasterError, is_pdf, render_pdf_pages, wrap_image
 from .structure import StructureEngine
+from .vision import VisionEngine, VisionError
 
 logging.basicConfig(
     level=os.environ.get("DOLICO_OCR_LOG_LEVEL", "INFO"),
@@ -38,6 +46,10 @@ engine = OCREngine(lang=LANG)
 # because a scanned table read as flat text is wrong rather than merely
 # uglier, and it costs only about a third more per page.
 structure = StructureEngine(lang=LANG)
+# Tier 3: MinerU. Never the default for a document -- it is reached per page,
+# only for pages the other tiers already lost, because it costs seconds and
+# gigabytes rather than milliseconds.
+vision = VisionEngine()
 
 # "layout" | "text" | "auto". Auto uses Tier 2 when it is installable.
 TIER = os.environ.get("DOLICO_OCR_TIER", "auto").strip().lower()
@@ -110,6 +122,10 @@ def healthz() -> JSONResponse:
             "tier": "layout" if active is structure else "text",
             "workers": WORKERS,
             "structure_available": structure_mod.available(),
+            # Advertised separately from the serving tier: vision is reached
+            # per page by the router, never as this service's default tier.
+            "vision_available": vision_mod.available(),
+            "vision": vision.describe(),
             "schema_version": SCHEMA_VERSION,
             "service_version": __version__,
             "models": active.describe(),
@@ -131,6 +147,8 @@ def version() -> dict:
         "engine_version": active.version,
         "tier": "layout" if active is structure else "text",
         "workers": WORKERS,
+        "vision_available": vision_mod.available(),
+        "vision_engine": vision_mod.ENGINE_NAME,
     }
 
 
@@ -139,12 +157,18 @@ async def extract(
     file: UploadFile = File(...),
     pages: str = Form(""),
     dpi: int = Form(DEFAULT_DPI),
+    tier: str = Form(""),
 ) -> JSONResponse:
     """OCR the requested pages of a document.
 
     `pages` is a comma-separated list of 1-indexed page numbers; empty means
     every page. The response is the canonical extract envelope, identical in
     shape to what the Rust shim produces.
+
+    `tier` selects an engine explicitly. Empty uses whichever tier this service
+    is serving; `vision` reaches Tier 3 for the named pages. Vision is
+    per-request rather than a service mode because it only makes sense for
+    pages the other tiers already lost.
     """
     started = time.monotonic()
 
@@ -160,6 +184,9 @@ async def extract(
         return _error(400, "malformed", str(exc))
 
     dpi = max(72, min(600, dpi))
+
+    if tier.strip().lower() == "vision":
+        return await _extract_vision(data, wanted, started)
 
     try:
         rendered = await run_in_threadpool(_render, data, wanted, dpi)
@@ -200,6 +227,53 @@ async def extract(
 
     duration_ms = int((time.monotonic() - started) * 1000)
     return JSONResponse(extract_output(pages_out, active.version, duration_ms, engine=name))
+
+
+async def _extract_vision(data: bytes, wanted: list[int] | None, started: float) -> JSONResponse:
+    """Tier 3: read named pages with MinerU.
+
+    Named pages only. Vision runs when the cheaper tiers have already failed a
+    specific page, so a whole-document vision request is a caller mistake
+    rather than something to quietly and expensively honor.
+    """
+    if not vision_mod.available():
+        return _error(
+            503,
+            "unavailable",
+            "the vision tier is not installed; run `uv sync --extra vision`",
+        )
+    if not is_pdf(data):
+        return _error(415, "unsupported", "the vision tier reads PDFs only")
+    if not wanted:
+        return _error(
+            400,
+            "malformed",
+            "the vision tier extracts named pages only; pass `pages`",
+        )
+
+    pages_out = []
+    for number in wanted:
+        try:
+            blocks, width, height = await run_in_threadpool(vision.read, data, number)
+        except VisionError as exc:
+            # One bad page must not fail the batch: the router keeps the OCR
+            # result for whatever is missing, which is strictly better than
+            # discarding the pages that did work.
+            log.error("vision page=%d failed: %s", number, exc)
+            continue
+
+        pages_out.append(
+            vision_page_payload(number, blocks, width, height, vision.version, vision.backend)
+        )
+        log.info("vision page=%d blocks=%d", number, len(blocks))
+
+    if not pages_out:
+        return _error(422, "malformed", "the vision tier could not read any requested page")
+
+    duration_ms = int((time.monotonic() - started) * 1000)
+    return JSONResponse(
+        extract_output(pages_out, vision.version, duration_ms, engine=vision_mod.ENGINE_NAME)
+    )
 
 
 def _render(data: bytes, pages: list[int] | None, dpi: int):

@@ -69,6 +69,10 @@ type Engine struct {
 	log         *slog.Logger
 
 	serviceWorkers int
+	// visionAvailable is whether the service has Tier 3 installed. Reported
+	// separately from the serving tier, because vision is reached per page by
+	// the router rather than by being this service's mode.
+	visionAvailable bool
 }
 
 // Option configures the engine.
@@ -172,6 +176,8 @@ type versionResponse struct {
 	EngineVersion  string `json:"engine_version"`
 	Tier           string `json:"tier"`
 	Workers        int    `json:"workers"`
+	VisionAvailable bool  `json:"vision_available"`
+	VisionEngine   string `json:"vision_engine"`
 }
 
 func (e *Engine) refreshVersion(ctx context.Context) error {
@@ -210,6 +216,7 @@ func (e *Engine) refreshVersion(ctx context.Context) error {
 	}
 	e.tier = payload.Tier
 	e.serviceWorkers = payload.Workers
+	e.visionAvailable = payload.VisionAvailable
 	e.mu.Unlock()
 	return nil
 }
@@ -341,34 +348,60 @@ func shard(pages []int, n int) [][]int {
 
 // extractOne runs a single request for one set of pages.
 func (e *Engine) extractOne(ctx context.Context, req *engine.ExtractRequest, pages []int) (*engine.ExtractResult, error) {
-	body, contentType, err := buildForm(req, pages)
+	res, _, err := e.extractTier(ctx, req, pages, "")
+	return res, err
+}
+
+// extractTier runs a single request against a named tier of the service.
+//
+// An empty tier means "whichever tier the service is serving"; "vision" reaches
+// Tier 3 for the named pages. Shared by the OCR and vision engines because the
+// transport is identical — only the tier field and the engine that answers
+// differ. Also returns the engine version the service reported, so each caller
+// can track its own tier's version for cache keys.
+func (e *Engine) extractTier(
+	ctx context.Context, req *engine.ExtractRequest, pages []int, tier string,
+) (*engine.ExtractResult, string, error) {
+	body, contentType, err := buildForm(req, pages, tier)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, e.baseURL+"/v1/extract", body)
 	if err != nil {
-		return nil, fmt.Errorf("paddleocr: %w", err)
+		return nil, "", fmt.Errorf("paddleocr: %w", err)
 	}
 	httpReq.Header.Set("Content-Type", contentType)
 
 	resp, err := e.client.Do(httpReq)
 	if err != nil {
-		return nil, fmt.Errorf("paddleocr: request to %s failed: %w", e.baseURL, err)
+		return nil, "", fmt.Errorf("paddleocr: request to %s failed: %w", e.baseURL, err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, classify(resp)
+		return nil, "", classify(resp)
 	}
 
 	var payload extractResponse
 	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
-		return nil, fmt.Errorf("paddleocr: cannot parse the response: %w", err)
+		return nil, "", fmt.Errorf("paddleocr: cannot parse the response: %w", err)
 	}
 	if payload.SchemaVersion != canonical.SchemaVersion {
-		return nil, fmt.Errorf("paddleocr: response schema %q, expected %q",
+		return nil, "", fmt.Errorf("paddleocr: response schema %q, expected %q",
 			payload.SchemaVersion, canonical.SchemaVersion)
+	}
+
+	result := &engine.ExtractResult{
+		Pages:      payload.Pages,
+		Metadata:   payload.Metadata,
+		DurationMS: payload.DurationMS,
+	}
+
+	// The vision tier answers as a different engine by design, so the
+	// identity checks below apply only to the OCR tiers.
+	if tier != "" {
+		return result, payload.EngineVersion, nil
 	}
 
 	// The service reports the engine version it actually ran, which may differ
@@ -381,16 +414,12 @@ func (e *Engine) extractOne(ctx context.Context, req *engine.ExtractRequest, pag
 	// A tier change mid-run would silently mix layout blocks and text lines
 	// under one cache key, so it is a hard error rather than a surprise.
 	if payload.Engine != "" && payload.Engine != e.Name() {
-		return nil, fmt.Errorf(
+		return nil, "", fmt.Errorf(
 			"paddleocr: the service switched tier from %q to %q; restart dolico to pick it up",
 			e.Name(), payload.Engine)
 	}
 
-	return &engine.ExtractResult{
-		Pages:      payload.Pages,
-		Metadata:   payload.Metadata,
-		DurationMS: payload.DurationMS,
-	}, nil
+	return result, payload.EngineVersion, nil
 }
 
 // buildForm streams the document and the page list into a multipart body.
@@ -398,7 +427,7 @@ func (e *Engine) extractOne(ctx context.Context, req *engine.ExtractRequest, pag
 // The document is sent by value rather than by path. That costs an upload per
 // OCR call, and buys a service that can run on another host or in another
 // container with no shared volume -- which is where this is going.
-func buildForm(req *engine.ExtractRequest, pages []int) (io.Reader, string, error) {
+func buildForm(req *engine.ExtractRequest, pages []int, tier string) (io.Reader, string, error) {
 	file, err := os.Open(req.Path)
 	if err != nil {
 		return nil, "", fmt.Errorf("paddleocr: cannot read the document: %w", err)
@@ -429,6 +458,11 @@ func buildForm(req *engine.ExtractRequest, pages []int) (io.Reader, string, erro
 	}
 	if dpi := req.Config["dpi"]; dpi != "" {
 		if err := mw.WriteField("dpi", dpi); err != nil {
+			return nil, "", fmt.Errorf("paddleocr: %w", err)
+		}
+	}
+	if tier != "" {
+		if err := mw.WriteField("tier", tier); err != nil {
 			return nil, "", fmt.Errorf("paddleocr: %w", err)
 		}
 	}

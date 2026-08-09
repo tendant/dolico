@@ -75,10 +75,12 @@ func run() error {
 	pageCache := cache.New(50_000)
 
 	rt := router.New(registry, ocr, pageCache, router.Options{
-		OCRThreshold: cfg.OCRThreshold,
-		Weights:      quality.DefaultWeights,
-		Logger:       log,
-	})
+		OCRThreshold:    cfg.OCRThreshold,
+		VisionThreshold: cfg.VisionThreshold,
+		VisionMaxPages:  cfg.VisionMaxPages,
+		Weights:         quality.DefaultWeights,
+		Logger:          log,
+	}).WithVision(visionEngine(cfg, ocr, log))
 
 	jobStore := jobs.NewStore(cfg.Workers, cfg.Workers*16, processDocument(store, rt, log), log)
 
@@ -169,6 +171,36 @@ func ocrEngine(cfg *config.Config, log *slog.Logger) (engine.Engine, error) {
 			"Install the layout tier with `uv sync --extra structure` in python/ocr-service")
 	}
 	return ocr, nil
+}
+
+// visionEngine returns the third tier, or nil to run with two.
+//
+// Three things must all hold: the operator asked for it, an OCR service is
+// configured (the vision tier is reached through it), and that service reports
+// MinerU installed. Any of them missing is a normal two-tier run, not an
+// error — Tier 3 is an optional escalation, not a dependency.
+func visionEngine(cfg *config.Config, ocr engine.Engine, log *slog.Logger) engine.Engine {
+	if !cfg.VisionEnabled {
+		return nil
+	}
+	client, ok := ocr.(*paddleocr.Engine)
+	if !ok {
+		log.Warn("vision tier requested but no OCR service is configured; running with two tiers")
+		return nil
+	}
+	v := paddleocr.NewVision(client)
+	if v == nil {
+		log.Warn("vision tier requested but the OCR service reports MinerU is not installed; " +
+			"run `uv sync --extra vision` in python/ocr-service")
+		return nil
+	}
+	// No version here: MinerU loads on first use, so the service cannot report
+	// one yet. It appears in provenance once a page has actually been read.
+	log.Info("vision tier connected",
+		"engine", v.Name(),
+		"threshold", cfg.VisionThreshold,
+		"max_pages", cfg.VisionMaxPages)
+	return v
 }
 
 // processDocument is the work each job runs: route the document, render the

@@ -28,6 +28,10 @@ type fakeEngine struct {
 	// text returned for each extracted page; missing pages get a default.
 	text map[int]string
 
+	// emptyPages makes the engine return pages with no blocks — what a vision
+	// tier does when it reads a page and finds nothing.
+	emptyPages bool
+
 	assets []canonical.Asset
 
 	// calls records the page sets passed to Extract, in order.
@@ -61,17 +65,20 @@ func (f *fakeEngine) Extract(_ context.Context, req *engine.ExtractRequest) (*en
 		if !ok {
 			text = "Extracted content for this page is long enough to score as plausible prose."
 		}
-		out = append(out, canonical.Page{
+		page := canonical.Page{
 			Number:         n,
 			Kind:           canonical.PageKindPaginated,
 			Classification: canonical.Classification{Type: canonical.PageTypeTextBased, Confidence: 1},
-			Blocks: []canonical.Block{{
+		}
+		if !f.emptyPages {
+			page.Blocks = []canonical.Block{{
 				ID:         fmt.Sprintf("p%d-b0", n),
 				Type:       canonical.BlockParagraph,
 				Text:       text,
 				Provenance: canonical.Provenance{Engine: f.name, EngineVersion: f.version, Method: "fake"},
-			}},
-		})
+			}}
+		}
+		out = append(out, page)
 	}
 	return &engine.ExtractResult{Pages: out, Assets: f.assets}, nil
 }
@@ -436,6 +443,276 @@ func TestTraceRecordsEveryEngineRun(t *testing.T) {
 		if !seen[want] {
 			t.Errorf("trace is missing a run for %q: %+v", want, doc.Trace.Engines)
 		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Tier 3 escalation
+// ---------------------------------------------------------------------------
+
+// garbage scores below any sane threshold; clean scores well above it.
+const (
+	garbage = "��� �� ����"
+	clean   = "This page reads as ordinary English prose about a subject at hand."
+)
+
+func visionRouter(t *testing.T, primary, ocr, vision engine.Engine, opts func(*Options)) *Router {
+	t.Helper()
+	o := Options{
+		OCRThreshold:    0.6,
+		VisionThreshold: 0.35,
+		VisionMaxPages:  5,
+		Logger:          testLogger(),
+	}
+	if opts != nil {
+		opts(&o)
+	}
+	engines := []engine.Engine{primary}
+	if ocr != nil {
+		engines = append(engines, ocr)
+	}
+	return New(engine.NewRegistry(engines...), ocr, cache.New(0), o).WithVision(vision)
+}
+
+// The core claim: a page OCR read badly gets a second escalation.
+func TestBadOCRPageEscalatesToVision(t *testing.T) {
+	primary := &fakeEngine{
+		name: "pdf", version: "1", support: engine.SupportNative,
+		inspection: inspection("pdf", canonical.PageTypeScanned),
+	}
+	ocr := &fakeEngine{name: "ocr", version: "1", inspectErr: engine.ErrUnsupported,
+		text: map[int]string{1: garbage}}
+	vision := &fakeEngine{name: "mineru", version: "2.5", inspectErr: engine.ErrUnsupported,
+		text: map[int]string{1: clean}}
+
+	doc, err := visionRouter(t, primary, ocr, vision, nil).Process(context.Background(), request())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(vision.calls) != 1 || vision.calls[0][0] != 1 {
+		t.Fatalf("vision should have read page 1, got %v", vision.calls)
+	}
+	if got := doc.Pages[0].Blocks[0].Provenance.Engine; got != "mineru" {
+		t.Errorf("page engine = %s, want mineru", got)
+	}
+	if q := doc.Pages[0].Quality; q == nil || !q.Escalated {
+		t.Errorf("the page should be marked escalated, got %+v", q)
+	}
+	if !hasReason(doc.Pages[0], "vision_escalated") {
+		t.Errorf("reasons = %v", doc.Pages[0].Classification.Reasons)
+	}
+}
+
+// A page OCR read well must not pay for Tier 3.
+func TestGoodOCRPageDoesNotEscalate(t *testing.T) {
+	primary := &fakeEngine{
+		name: "pdf", version: "1", support: engine.SupportNative,
+		inspection: inspection("pdf", canonical.PageTypeScanned),
+	}
+	ocr := &fakeEngine{name: "ocr", version: "1", inspectErr: engine.ErrUnsupported,
+		text: map[int]string{1: clean}}
+	vision := &fakeEngine{name: "mineru", version: "2.5", inspectErr: engine.ErrUnsupported}
+
+	if _, err := visionRouter(t, primary, ocr, vision, nil).Process(context.Background(), request()); err != nil {
+		t.Fatal(err)
+	}
+	if len(vision.calls) != 0 {
+		t.Errorf("vision ran on a page OCR read fine: %v", vision.calls)
+	}
+}
+
+// A natively-extracted page never reaches Tier 3, however it scored — it was
+// never handed to OCR, so it is not an OCR failure to recover.
+func TestNativePageNeverReachesVision(t *testing.T) {
+	primary := &fakeEngine{
+		name: "pdf", version: "1", support: engine.SupportNative,
+		inspection: inspection("pdf", canonical.PageTypeTextBased),
+		text:       map[int]string{1: clean},
+	}
+	vision := &fakeEngine{name: "mineru", version: "2.5", inspectErr: engine.ErrUnsupported}
+
+	if _, err := visionRouter(t, primary, nil, vision, nil).Process(context.Background(), request()); err != nil {
+		t.Fatal(err)
+	}
+	if len(vision.calls) != 0 {
+		t.Errorf("vision ran on a natively-extracted page: %v", vision.calls)
+	}
+}
+
+// Tier 3 must never make a page worse.
+func TestVisionFailureKeepsTheOCRResult(t *testing.T) {
+	primary := &fakeEngine{
+		name: "pdf", version: "1", support: engine.SupportNative,
+		inspection: inspection("pdf", canonical.PageTypeScanned),
+	}
+	ocr := &fakeEngine{name: "ocr", version: "1", inspectErr: engine.ErrUnsupported,
+		text: map[int]string{1: garbage}}
+	vision := &fakeEngine{name: "mineru", version: "2.5", inspectErr: engine.ErrUnsupported,
+		extractErr: errors.New("mineru fell over")}
+
+	doc, err := visionRouter(t, primary, ocr, vision, nil).Process(context.Background(), request())
+	if err != nil {
+		t.Fatalf("a failed vision tier must not fail the document: %v", err)
+	}
+	if got := doc.Pages[0].Blocks[0].Provenance.Engine; got != "ocr" {
+		t.Errorf("the OCR result should survive, got engine %s", got)
+	}
+	if !hasReason(doc.Pages[0], "vision_failed") {
+		t.Errorf("the failure should be visible in reasons, got %v", doc.Pages[0].Classification.Reasons)
+	}
+}
+
+// An empty vision result is worse than the bad text we already had.
+func TestEmptyVisionResultKeepsTheOCRResult(t *testing.T) {
+	primary := &fakeEngine{
+		name: "pdf", version: "1", support: engine.SupportNative,
+		inspection: inspection("pdf", canonical.PageTypeScanned),
+	}
+	ocr := &fakeEngine{name: "ocr", version: "1", inspectErr: engine.ErrUnsupported,
+		text: map[int]string{1: garbage}}
+	vision := &fakeEngine{name: "mineru", version: "2.5", inspectErr: engine.ErrUnsupported,
+		emptyPages: true}
+
+	doc, err := visionRouter(t, primary, ocr, vision, nil).Process(context.Background(), request())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(doc.Pages[0].Blocks) == 0 {
+		t.Fatal("the OCR blocks were discarded for an empty vision result")
+	}
+	if !hasReason(doc.Pages[0], "vision_empty") {
+		t.Errorf("reasons = %v", doc.Pages[0].Classification.Reasons)
+	}
+}
+
+// The cap must keep the pages that need it most, and say what it dropped.
+func TestVisionCapEscalatesTheWorstPages(t *testing.T) {
+	kinds := make([]canonical.PageType, 4)
+	for i := range kinds {
+		kinds[i] = canonical.PageTypeScanned
+	}
+	primary := &fakeEngine{
+		name: "pdf", version: "1", support: engine.SupportNative,
+		inspection: inspection("pdf", kinds...),
+	}
+	// Page 3 is the worst (nothing at all), then 1 and 2; page 4 is clean.
+	ocr := &fakeEngine{name: "ocr", version: "1", inspectErr: engine.ErrUnsupported,
+		text: map[int]string{
+			1: garbage,
+			2: garbage + garbage,
+			3: "",
+			4: clean,
+		}}
+	vision := &fakeEngine{name: "mineru", version: "2.5", inspectErr: engine.ErrUnsupported,
+		text: map[int]string{1: clean, 2: clean, 3: clean}}
+
+	r := visionRouter(t, primary, ocr, vision, func(o *Options) { o.VisionMaxPages = 2 })
+	if _, err := r.Process(context.Background(), request()); err != nil {
+		t.Fatal(err)
+	}
+	if len(vision.calls) != 1 {
+		t.Fatalf("expected one vision call, got %v", vision.calls)
+	}
+	got := vision.calls[0]
+	if len(got) != 2 {
+		t.Fatalf("the cap should have limited this to 2 pages, got %v", got)
+	}
+	// Page 4 read fine and must not be among them.
+	if slices.Contains(got, 4) {
+		t.Errorf("a well-read page was escalated: %v", got)
+	}
+}
+
+// A page's quality must describe the text actually on it. Carrying the
+// pre-OCR score forward looks harmless until Tier 3 reads it: a page OCR
+// rescued would still be escalated, and a page OCR ruined would not be.
+func TestAnOCRPageIsScoredOnWhatOCRProduced(t *testing.T) {
+	primary := &fakeEngine{
+		name: "pdf", version: "1", support: engine.SupportNative,
+		inspection: inspection("pdf", canonical.PageTypeTextBased),
+		text:       map[int]string{1: garbage}, // scores below the OCR threshold
+	}
+	ocr := &fakeEngine{name: "ocr", version: "1", inspectErr: engine.ErrUnsupported,
+		text: map[int]string{1: clean}} // ...and OCR rescues it
+	vision := &fakeEngine{name: "mineru", version: "2.5", inspectErr: engine.ErrUnsupported}
+
+	doc, err := visionRouter(t, primary, ocr, vision, nil).Process(context.Background(), request())
+	if err != nil {
+		t.Fatal(err)
+	}
+	q := doc.Pages[0].Quality
+	if q == nil {
+		t.Fatal("the page has no quality")
+	}
+	if q.Score < 0.6 {
+		t.Errorf("score = %v; that is the pre-OCR score, not the OCR result's", q.Score)
+	}
+	if !q.Escalated {
+		t.Error("the page was escalated to OCR and should say so")
+	}
+	if len(vision.calls) != 0 {
+		t.Errorf("vision ran on a page OCR had already rescued: %v", vision.calls)
+	}
+}
+
+func TestNoVisionEngineIsATwoTierRun(t *testing.T) {
+	primary := &fakeEngine{
+		name: "pdf", version: "1", support: engine.SupportNative,
+		inspection: inspection("pdf", canonical.PageTypeScanned),
+	}
+	ocr := &fakeEngine{name: "ocr", version: "1", inspectErr: engine.ErrUnsupported,
+		text: map[int]string{1: garbage}}
+
+	doc, err := visionRouter(t, primary, ocr, nil, nil).Process(context.Background(), request())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := doc.Pages[0].Blocks[0].Provenance.Engine; got != "ocr" {
+		t.Errorf("engine = %s, want the OCR result to stand", got)
+	}
+}
+
+// A zero threshold disables the tier without needing the engine removed.
+func TestZeroThresholdDisablesVision(t *testing.T) {
+	primary := &fakeEngine{
+		name: "pdf", version: "1", support: engine.SupportNative,
+		inspection: inspection("pdf", canonical.PageTypeScanned),
+	}
+	ocr := &fakeEngine{name: "ocr", version: "1", inspectErr: engine.ErrUnsupported,
+		text: map[int]string{1: garbage}}
+	vision := &fakeEngine{name: "mineru", version: "2.5", inspectErr: engine.ErrUnsupported}
+
+	r := visionRouter(t, primary, ocr, vision, func(o *Options) { o.VisionThreshold = 0 })
+	if _, err := r.Process(context.Background(), request()); err != nil {
+		t.Fatal(err)
+	}
+	if len(vision.calls) != 0 {
+		t.Errorf("vision ran with the threshold at zero: %v", vision.calls)
+	}
+}
+
+func TestVisionRunAppearsInTheTrace(t *testing.T) {
+	primary := &fakeEngine{
+		name: "pdf", version: "1", support: engine.SupportNative,
+		inspection: inspection("pdf", canonical.PageTypeScanned),
+	}
+	ocr := &fakeEngine{name: "ocr", version: "1", inspectErr: engine.ErrUnsupported,
+		text: map[int]string{1: garbage}}
+	vision := &fakeEngine{name: "mineru", version: "2.5", inspectErr: engine.ErrUnsupported,
+		text: map[int]string{1: clean}}
+
+	doc, err := visionRouter(t, primary, ocr, vision, nil).Process(context.Background(), request())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var found bool
+	for _, run := range doc.Trace.Engines {
+		if run.Engine == "mineru" && slices.Equal(run.Pages, []int{1}) {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("the vision run is missing from the trace: %+v", doc.Trace.Engines)
 	}
 }
 

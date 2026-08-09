@@ -7,13 +7,21 @@ It is deliberately optional: with no OCR service configured the Go API falls
 back to a stub tier, so the rest of the system builds, runs and tests with no
 Python installed.
 
-## Two tiers
+## Three tiers
 
-| | Tier 1 — `paddleocr` | Tier 2 — `pp-structurev3` |
-| --- | --- | --- |
-| Detects | text lines | layout regions: headings, paragraphs, figures, **tables** |
-| A scanned table | 18 loose fragments | a 5×3 grid |
-| Dependencies | base install | `+ paddlex[ocr]` (~150MB) |
+| | Tier 1 — `paddleocr` | Tier 2 — `pp-structurev3` | Tier 3 — `mineru` |
+| --- | --- | --- | --- |
+| Detects | text lines | layout regions: headings, paragraphs, figures, **tables** | the whole page, by a 1.2B vision model |
+| A scanned table | 18 loose fragments | a 5×3 grid | a 5×3 grid |
+| Dependencies | base install | `+ paddlex[ocr]` (~150MB) | `+ mineru[core]` (torch, ~2.5GB of weights) |
+| Selected by | the router, per page | the router, per page | the **router's escalation**, per page, after Tier 1/2 produced a bad read |
+| Cost | ~2.5s/page | ~2.8s/page | seconds to a minute per page |
+
+Tiers 1 and 2 are alternatives: one of them serves every OCR request, and which
+one depends only on what is installed. Tier 3 is not an alternative — it is a
+second chance for individual pages the chosen OCR tier scored badly on, and it
+is off unless the API server is started with `DOLICO_VISION_ENABLED=1`. See
+`docs/vision-tier-design.md` for why it exists and when it fires.
 
 Scored by `make bench-ocr` over the fixture corpus:
 
@@ -35,7 +43,9 @@ says loudly at startup when it has fallen back.
 make ocr                 # from the repository root; layout tier, on 127.0.0.1:8181
 make ocr OCR_WORKERS=4   # four pages at once -- see Concurrency for the memory cost
 make ocr-text            # text-line tier only
+make ocr-vision          # layout tier plus MinerU, so Tier 3 is reachable
 make run-ocr             # the API server, wired to whichever is running
+make run-vision          # the same, with the vision escalation enabled
 ```
 
 The first start downloads models into `~/.paddlex` — about 50MB for Tier 1 and
@@ -47,14 +57,22 @@ is still warming up.
 
 | Method | Path | |
 | --- | --- | --- |
-| `POST` | `/v1/extract` | multipart: `file`, `pages` (comma-separated, 1-indexed, empty = all), `dpi` |
-| `GET` | `/v1/version` | schema, service and engine versions, and the active tier |
+| `POST` | `/v1/extract` | multipart: `file`, `pages` (comma-separated, 1-indexed, empty = all), `dpi`, `tier` |
+| `GET` | `/v1/version` | schema, service and engine versions, the active tier, and whether vision is installed |
 | `GET` | `/healthz` | readiness, the active tier, and which models are loaded |
 
 `/v1/version` reports the engine name for the tier actually serving —
 `paddleocr` or `pp-structurev3`. The Go client adopts it as its engine name, so
 provenance and cache keys follow the tier: switching tiers invalidates the
 pages the other one produced rather than silently mixing them.
+
+`tier=vision` routes the request to Tier 3 instead, which answers as engine
+`mineru` with its own version. It requires explicit page numbers — Tier 3 is a
+per-page escalation, and a whole-document vision request is almost always a
+mistake, so it is refused with a 400 rather than served. A page the vision
+model fails on is skipped and the rest are returned; a request where *every*
+page failed is a 422. `vision_available` is advertised separately from the OCR
+tier so a client can decide whether Tier 3 exists without attempting it.
 
 `/v1/extract` returns the same canonical extract envelope the Rust shim
 produces, so the Go client parses both with one code path. Failures return the
@@ -92,6 +110,20 @@ Markdown view separately promotes the first row into the header position,
 because GFM cannot express a headerless table — that is a rendering
 concession, and the JSON stays exact.
 
+**Tier 3** reads the page image directly with MinerU2.5, a 1.2B vision model,
+and returns the same block types. Its geometry arrives normalized to a
+0–1000 box measured from the top-left, so this service scales it to the page's
+point size and flips the vertical axis — the same conversion the OCR tiers do
+from pixels, and wrong in the same visually-plausible way if skipped.
+
+Two differences from the OCR tiers are worth knowing:
+
+- **No confidence.** MinerU does not report one, and this service does not
+  invent one. Tier 3 blocks carry no `confidence` field rather than a fabricated
+  `1.0` that would outrank a genuinely-measured OCR score.
+- **Reading order is recovered, not reported.** MinerU's output order is not
+  reading order, so blocks are sorted top-to-bottom then left-to-right here.
+
 Two things both OCR tiers provide that no other engine in the pipeline can:
 
 - **Real per-block confidence.** A native parser reading DOCX XML is not "95%
@@ -119,6 +151,21 @@ Two things both OCR tiers provide that no other engine in the pipeline can:
 | `DOLICO_OCR_TEXTLINE_ORIENTATION` | off | per-line orientation |
 | `DOLICO_OCR_MAX_UPLOAD_BYTES` | 256MiB | per-request cap |
 | `DOLICO_OCR_LAZY_LOAD` | off | skip loading models at startup |
+| `DOLICO_MINERU_BACKEND` | `hybrid-engine` | Tier 3 backend — see below |
+| `DOLICO_MINERU_EFFORT` | `medium` | MinerU inference effort |
+| `DOLICO_MINERU_URL` | unset | run MinerU as its own service and only talk to it |
+
+### On the MinerU backend
+
+`hybrid-engine` is the default and is load-bearing, not a preference. It is the
+only backend measured here that reads `scanned-table.pdf` completely correctly;
+`pipeline` is a different arrangement of the same model families Tier 2 already
+uses, so it tends to fail the same pages Tier 3 was called in to rescue.
+
+Setting `DOLICO_MINERU_URL` switches to the matching HTTP-client backend
+(`hybrid-engine` → `hybrid-http-client`) and keeps ~8GB of weights out of a
+service already measured at ~3GB per worker. `pipeline` has no remote form and
+is rejected when a URL is set.
 
 ### On table orientation classification
 
@@ -207,7 +254,7 @@ memory for latency deliberately — and startup costs one model load per worker.
 make test-ocr    # pytest, plus the Go client against a live service
 ```
 
-The Python tests replace both OCR engines with fakes, so they run in a couple
+The Python tests replace all three engines with fakes, so they run in a couple
 of seconds without loading a model. What they cover is the contract: the
 canonical envelope, the error envelope, page filtering, table HTML conversion
 including merged cells, reading order, and the pixel-to-point coordinate flip —

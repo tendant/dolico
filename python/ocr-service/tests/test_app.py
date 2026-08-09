@@ -293,6 +293,120 @@ class TestLayoutTier:
         assert "layout_analysis" in body["pages"][0]["classification"]["reasons"]
 
 
+class FakeVisionEngine:
+    """Stands in for MinerU. Returns one heading and one table per page."""
+
+    version = "2.5.0-fake"
+    backend = "hybrid-engine"
+    loaded = True
+
+    def __init__(self):
+        self.calls = []
+        self.fail_pages = set()
+
+    def describe(self):
+        return {"backend": self.backend, "effort": "medium", "server_url": ""}
+
+    def load(self):
+        pass
+
+    def read(self, pdf_bytes, page_number):
+        from dolico_ocr.vision import VisionBlock, VisionError
+
+        self.calls.append(page_number)
+        if page_number in self.fail_pages:
+            raise VisionError(f"page {page_number} exploded")
+        blocks = [
+            VisionBlock("text", "QUARTERLY SALES", 100, 100, 500, 130, 1),
+            VisionBlock(
+                "table",
+                "<table><tr><td>Region</td><td>Units</td></tr>"
+                "<tr><td>North</td><td>120</td></tr></table>",
+                100, 200, 800, 400, None,
+            ),
+        ]
+        return blocks, 612.0, 792.0
+
+
+@pytest.fixture
+def vision_client(monkeypatch):
+    fake = FakeVisionEngine()
+    monkeypatch.setattr(app_module, "vision", fake)
+    monkeypatch.setattr(app_module.vision_mod, "available", lambda: True)
+    monkeypatch.setattr(app_module, "TIER", "text")
+    monkeypatch.setattr(app_module, "engine", FakeEngine())
+    with TestClient(app_module.app) as c:
+        c.fake = fake
+        yield c
+
+
+class TestVisionTier:
+    def post(self, client, pages="1", name="scanned.pdf", data=None):
+        return client.post(
+            "/v1/extract",
+            files={"file": (name, data if data is not None else pdf(name), "application/pdf")},
+            data={"pages": pages, "tier": "vision"},
+        )
+
+    def test_the_envelope_names_the_vision_engine(self, vision_client):
+        body = self.post(vision_client).json()
+        assert body["engine"] == "mineru"
+        assert body["engine_version"] == "2.5.0-fake"
+
+    def test_blocks_are_mapped_with_geometry_and_provenance(self, vision_client):
+        page = self.post(vision_client).json()["pages"][0]
+        assert [b["type"] for b in page["blocks"]] == ["heading", "table"]
+        assert page["width"] == pytest.approx(612.0)
+        for block in page["blocks"]:
+            assert block["provenance"]["engine"] == "mineru"
+            assert block["provenance"]["method"].startswith("mineru/hybrid-engine:")
+            # Unlike a hosted reasoning model, MinerU measures geometry.
+            assert block["bbox"]["width"] > 0
+
+    def test_only_the_named_pages_are_read(self, vision_client):
+        body = self.post(vision_client, pages="2,5", name="mixed.pdf").json()
+        assert vision_client.fake.calls == [2, 5]
+        assert [p["number"] for p in body["pages"]] == [2, 5]
+
+    def test_a_whole_document_request_is_refused(self, vision_client):
+        # Vision runs on pages the cheaper tiers already lost; a document-wide
+        # request is a caller mistake, not something to expensively honor.
+        resp = self.post(vision_client, pages="")
+        assert resp.status_code == 400
+        assert vision_client.fake.calls == []
+
+    def test_one_failed_page_does_not_lose_the_others(self, vision_client):
+        vision_client.fake.fail_pages = {1}
+        body = self.post(vision_client, pages="1,2", name="mixed.pdf").json()
+        assert [p["number"] for p in body["pages"]] == [2]
+
+    def test_every_page_failing_is_an_error(self, vision_client):
+        vision_client.fake.fail_pages = {1}
+        resp = self.post(vision_client, pages="1")
+        assert resp.status_code == 422
+
+    def test_non_pdf_input_is_rejected(self, vision_client):
+        resp = self.post(vision_client, name="x.png", data=b"\x89PNG\r\n\x1a\n")
+        assert resp.status_code == 415
+
+    def test_unavailable_when_mineru_is_not_installed(self, vision_client, monkeypatch):
+        monkeypatch.setattr(app_module.vision_mod, "available", lambda: False)
+        resp = self.post(vision_client)
+        assert resp.status_code == 503
+        assert "uv sync --extra vision" in resp.json()["message"]
+
+    def test_availability_is_advertised_separately_from_the_serving_tier(self, vision_client):
+        health = vision_client.get("/healthz").json()
+        # Vision is reached per page by the router, never as the service tier.
+        assert health["tier"] == "text"
+        assert health["vision_available"] is True
+        assert health["vision"]["backend"] == "hybrid-engine"
+
+        version = vision_client.get("/v1/version").json()
+        assert version["vision_available"] is True
+        assert version["vision_engine"] == "mineru"
+
+
 class TestBBoxConversion:
     def page(self):
         return RasteredPage(

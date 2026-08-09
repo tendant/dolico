@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -44,6 +45,14 @@ type Config struct {
 	// is almost always right: more requests than workers only queue on the far
 	// side while paying to upload the document again.
 	OCRConcurrency int
+	// VisionEnabled turns on the third tier. Off by default: it costs seconds
+	// and gigabytes per page, and only helps pages the OCR tiers already lost.
+	VisionEnabled bool
+	// VisionThreshold is the page quality below which an OCR result is
+	// re-read by the vision tier. Lower than OCRThreshold on purpose.
+	VisionThreshold float64
+	// VisionMaxPages bounds vision escalation per document.
+	VisionMaxPages int
 }
 
 // Load reads configuration from the environment, applying defaults.
@@ -56,8 +65,11 @@ func Load() (*Config, error) {
 		ShimTimeout:    120 * time.Second,
 		OCRThreshold:   0.60,
 		MaxUploadBytes: 256 << 20,
-		OCRURL:         env("DOLICO_OCR_URL", ""),
-		OCRTimeout:     10 * time.Minute,
+		OCRURL:          env("DOLICO_OCR_URL", ""),
+		OCRTimeout:      10 * time.Minute,
+		VisionEnabled:   envBool("DOLICO_VISION_ENABLED", false),
+		VisionThreshold: 0.35,
+		VisionMaxPages:  5,
 	}
 
 	var err error
@@ -84,6 +96,25 @@ func Load() (*Config, error) {
 	}
 	if c.OCRConcurrency < 0 {
 		return nil, fmt.Errorf("DOLICO_OCR_CONCURRENCY must not be negative, got %d", c.OCRConcurrency)
+	}
+	if c.VisionThreshold, err = envFloat("DOLICO_VISION_THRESHOLD", c.VisionThreshold); err != nil {
+		return nil, err
+	}
+	if c.VisionThreshold < 0 || c.VisionThreshold > 1 {
+		return nil, fmt.Errorf("DOLICO_VISION_THRESHOLD must be within 0..1, got %v", c.VisionThreshold)
+	}
+	if c.VisionThreshold >= c.OCRThreshold {
+		// A vision bar at or above the OCR bar would escalate every page OCR
+		// touched, which is not a fallback tier but a default one.
+		return nil, fmt.Errorf(
+			"DOLICO_VISION_THRESHOLD (%v) must be below DOLICO_OCR_THRESHOLD (%v)",
+			c.VisionThreshold, c.OCRThreshold)
+	}
+	if c.VisionMaxPages, err = envInt("DOLICO_VISION_MAX_PAGES", c.VisionMaxPages); err != nil {
+		return nil, err
+	}
+	if c.VisionMaxPages < 1 {
+		return nil, fmt.Errorf("DOLICO_VISION_MAX_PAGES must be at least 1, got %d", c.VisionMaxPages)
 	}
 	maxUpload := c.MaxUploadBytes
 	if maxUpload, err = envInt64("DOLICO_MAX_UPLOAD_BYTES", maxUpload); err != nil {
@@ -129,6 +160,19 @@ func env(key, def string) string {
 		return v
 	}
 	return def
+}
+
+func envBool(key string, def bool) bool {
+	v, ok := os.LookupEnv(key)
+	if !ok || v == "" {
+		return def
+	}
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
+	}
 }
 
 func envInt(key string, def int) (int, error) {
