@@ -1,0 +1,236 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/tendant/dolico/schema/canonical-v1.json",
+  "title": "Dolico Canonical Document",
+  "description": "The canonical document model produced by every extraction engine. Mirrored by internal/canonical/document.go (Go) and rust/dolico-rs/src/canonical.rs (Rust); those two mirrors are validated against this file by the golden tests.",
+  "type": "object",
+  "required": ["schema_version", "id", "source", "metadata", "pages", "trace"],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": { "const": "1.0" },
+    "id": { "type": "string", "minLength": 1 },
+    "source": { "$ref": "#/$defs/source" },
+    "metadata": { "$ref": "#/$defs/metadata" },
+    "pages": { "type": "array", "items": { "$ref": "#/$defs/page" } },
+    "assets": { "type": "array", "items": { "$ref": "#/$defs/asset" } },
+    "trace": { "$ref": "#/$defs/trace" }
+  },
+  "$defs": {
+    "source": {
+      "type": "object",
+      "required": ["filename", "media_type", "sha256", "size_bytes"],
+      "additionalProperties": false,
+      "properties": {
+        "filename": { "type": "string" },
+        "media_type": { "type": "string" },
+        "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "size_bytes": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "metadata": {
+      "type": "object",
+      "required": ["page_count"],
+      "additionalProperties": false,
+      "properties": {
+        "title": { "type": "string" },
+        "author": { "type": "string" },
+        "language": { "type": "string" },
+        "page_count": { "type": "integer", "minimum": 0 },
+        "custom": { "type": "object", "additionalProperties": { "type": "string" } }
+      }
+    },
+    "page": {
+      "type": "object",
+      "required": ["number", "kind", "classification", "blocks"],
+      "additionalProperties": false,
+      "properties": {
+        "number": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "1-indexed. pdf-inspector mixes 0- and 1-indexed page numbers across its API; the Rust shim normalizes every one of them to 1-indexed here."
+        },
+        "kind": { "enum": ["paginated", "slide", "sheet", "section"] },
+        "width": { "type": "number" },
+        "height": { "type": "number" },
+        "classification": { "$ref": "#/$defs/classification" },
+        "blocks": { "type": "array", "items": { "$ref": "#/$defs/block" } },
+        "quality": { "$ref": "#/$defs/quality" }
+      }
+    },
+    "classification": {
+      "type": "object",
+      "required": ["type", "confidence"],
+      "additionalProperties": false,
+      "properties": {
+        "type": { "enum": ["text_based", "scanned", "image_based", "mixed", "native"] },
+        "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+        "reasons": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "block": {
+      "type": "object",
+      "required": ["id", "type", "provenance"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "type": {
+          "enum": ["heading", "paragraph", "list", "table", "image", "code", "quote", "rule", "formula"]
+        },
+        "text": { "type": "string" },
+        "level": { "type": "integer", "minimum": 1 },
+        "lang": { "type": "string" },
+        "list": { "$ref": "#/$defs/list" },
+        "table": { "$ref": "#/$defs/table" },
+        "quote": { "type": "array", "items": { "$ref": "#/$defs/block" } },
+        "inline": { "type": "array", "items": { "$ref": "#/$defs/span" } },
+        "asset_ref": { "type": "string" },
+        "alt": { "type": "string" },
+        "bbox": {
+          "$ref": "#/$defs/bbox",
+          "description": "Absent wherever the source has no geometry. Never fabricated; provenance.method records why it is missing."
+        },
+        "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+        "provenance": { "$ref": "#/$defs/provenance" }
+      }
+    },
+    "span": {
+      "type": "object",
+      "required": ["text"],
+      "additionalProperties": false,
+      "properties": {
+        "text": { "type": "string" },
+        "bold": { "type": "boolean" },
+        "italic": { "type": "boolean" },
+        "strike": { "type": "boolean" },
+        "code": { "type": "boolean" },
+        "underline": { "type": "boolean" },
+        "href": { "type": "string" }
+      }
+    },
+    "list": {
+      "type": "object",
+      "required": ["ordered", "items"],
+      "additionalProperties": false,
+      "properties": {
+        "ordered": { "type": "boolean" },
+        "marker": {
+          "enum": ["bullet", "decimal", "lower_alpha", "upper_alpha", "lower_roman", "upper_roman"]
+        },
+        "start": { "type": "integer" },
+        "items": { "type": "array", "items": { "$ref": "#/$defs/list_item" } }
+      }
+    },
+    "list_item": {
+      "type": "object",
+      "required": ["blocks"],
+      "additionalProperties": false,
+      "properties": {
+        "blocks": { "type": "array", "items": { "$ref": "#/$defs/block" } },
+        "checked": { "type": "boolean" }
+      }
+    },
+    "table": {
+      "type": "object",
+      "required": ["header_rows", "grid"],
+      "additionalProperties": false,
+      "properties": {
+        "header_rows": { "type": "integer", "minimum": 0 },
+        "kind": { "enum": ["data", "layout"] },
+        "grid": {
+          "type": "array",
+          "items": { "type": "array", "items": { "$ref": "#/$defs/cell" } },
+          "description": "Rows may be ragged. A merged cell is one origin slot carrying row_span/col_span plus covered_by shadow slots, so grid[r][c] is always addressable."
+        }
+      }
+    },
+    "cell": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "blocks": { "type": "array", "items": { "$ref": "#/$defs/block" } },
+        "row_span": { "type": "integer", "minimum": 1 },
+        "col_span": { "type": "integer", "minimum": 1 },
+        "covered_by": {
+          "type": "object",
+          "required": ["row", "col"],
+          "additionalProperties": false,
+          "properties": {
+            "row": { "type": "integer", "minimum": 0 },
+            "col": { "type": "integer", "minimum": 0 }
+          },
+          "description": "Present only on shadow slots; points at the origin cell that spans into this position."
+        }
+      }
+    },
+    "bbox": {
+      "type": "object",
+      "required": ["x", "y", "width", "height"],
+      "additionalProperties": false,
+      "description": "PDF user space: origin bottom-left, units are points.",
+      "properties": {
+        "x": { "type": "number" },
+        "y": { "type": "number" },
+        "width": { "type": "number" },
+        "height": { "type": "number" }
+      }
+    },
+    "provenance": {
+      "type": "object",
+      "required": ["engine", "engine_version", "method"],
+      "additionalProperties": false,
+      "properties": {
+        "engine": { "type": "string", "minLength": 1 },
+        "engine_version": { "type": "string" },
+        "method": { "type": "string" }
+      }
+    },
+    "asset": {
+      "type": "object",
+      "required": ["id", "media_type", "blob_ref", "size_bytes"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "media_type": { "type": "string" },
+        "blob_ref": { "type": "string" },
+        "size_bytes": { "type": "integer", "minimum": 0 },
+        "origin": { "type": "string" }
+      }
+    },
+    "quality": {
+      "type": "object",
+      "required": ["score", "char_count", "replacement_ratio", "word_ratio"],
+      "additionalProperties": false,
+      "properties": {
+        "score": { "type": "number", "minimum": 0, "maximum": 1 },
+        "char_count": { "type": "integer", "minimum": 0 },
+        "replacement_ratio": { "type": "number", "minimum": 0, "maximum": 1 },
+        "word_ratio": { "type": "number", "minimum": 0, "maximum": 1 },
+        "engine_confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+        "escalated": { "type": "boolean" }
+      }
+    },
+    "trace": {
+      "type": "object",
+      "required": ["trace_id", "pipeline_version", "engines"],
+      "additionalProperties": false,
+      "properties": {
+        "trace_id": { "type": "string", "minLength": 1 },
+        "pipeline_version": { "type": "string" },
+        "engines": { "type": "array", "items": { "$ref": "#/$defs/engine_run" } }
+      }
+    },
+    "engine_run": {
+      "type": "object",
+      "required": ["engine", "version", "duration_ms"],
+      "additionalProperties": false,
+      "properties": {
+        "engine": { "type": "string" },
+        "version": { "type": "string" },
+        "pages": { "type": "array", "items": { "type": "integer", "minimum": 1 } },
+        "duration_ms": { "type": "integer", "minimum": 0 },
+        "cache_hit": { "type": "boolean" },
+        "error": { "type": "string" }
+      }
+    }
+  }
+}
