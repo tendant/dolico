@@ -1,0 +1,15 @@
+# Build output
+/bin/
+/rust/dolico-rs/target/
+
+# Repo-local build caches (see the Makefile: builds never touch the shared
+# machine-wide Go cache)
+/.gocache/
+/.gomodcache/
+
+# Runtime data. The blob store has no persistence guarantees and defaults under
+# $TMPDIR; this covers the case where DOLICO_DATA_DIR points into the repo.
+/data/
+/dev-data/
+
+.DS_Store

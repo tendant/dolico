@@ -329,3 +329,23 @@ This minimizes complexity while retaining the strengths of each
 ecosystem and provides a clean, maintainable architecture that can scale
 from a single Docker Compose deployment to a distributed GPU-backed
 processing platform.
+
+------------------------------------------------------------------------
+
+# Implementation Status
+
+This design is implemented in this repository. See
+[README.md](README.md) for what works today, what does not, and how to run it.
+
+Three findings from implementation revised the plan above:
+
+1.  `pdf-inspector` and `anydoc` are existing MIT-licensed Firecrawl crates,
+    not components to be written. Native parsers in Go were therefore
+    unnecessary — `anydoc` already covers every format listed under "Native
+    documents" except HTML, Markdown and plain text.
+2.  Neither library exposes its document model as JSON, so the Rust component
+    that *was* needed is a thin shim serializing both into the canonical
+    schema.
+3.  `anydoc`'s model is a flat block flow with no slide or sheet boundaries, so
+    native documents map to a single canonical page of kind `section` rather
+    than to invented pagination.

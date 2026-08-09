@@ -1,0 +1,8 @@
+Plain text carries no markup, and nothing here should be interpreted as any.
+
+Characters like # and * and | are literal in this file. A line that looks
+like - this is not a list item.
+
+    Indented lines keep their indentation.
+
+The last paragraph has no trailing newline issues.
