@@ -1,0 +1,30 @@
+[project]
+name = "dolico-ocr"
+version = "0.1.0"
+description = "Dolico OCR tier: rasterize PDF pages and read them with PaddleOCR"
+requires-python = ">=3.11,<3.13"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.32",
+    "python-multipart>=0.0.12",
+    "pypdfium2>=4.30",
+    "numpy>=1.26",
+    "paddlepaddle>=3.0",
+    "paddleocr>=3.0",
+]
+
+# PaddlePaddle publishes no wheels for 3.13+ yet, hence the upper bound above.
+# uv picks a compatible interpreter automatically.
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0", "httpx>=0.27"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["dolico_ocr"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

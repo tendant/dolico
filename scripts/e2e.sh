@@ -29,6 +29,17 @@ cleanup() {
 }
 trap cleanup EXIT
 
+if [[ -n "${DOLICO_OCR_URL:-}" ]]; then
+    if ! curl -fsS "${DOLICO_OCR_URL}/healthz" >/dev/null 2>&1; then
+        echo "DOLICO_OCR_URL is set to ${DOLICO_OCR_URL} but nothing is healthy there." >&2
+        echo "Start the OCR service with 'make ocr', or unset DOLICO_OCR_URL to use the stub." >&2
+        exit 1
+    fi
+    echo "OCR tier: ${DOLICO_OCR_URL}"
+else
+    echo "OCR tier: stub (set DOLICO_OCR_URL for real OCR)"
+fi
+
 echo "Starting dolico on ${BASE} (data: ${DATA_DIR})"
 DOLICO_ADDR="127.0.0.1:${PORT}" DOLICO_DATA_DIR="${DATA_DIR}" ./bin/dolico >"${LOG}" 2>&1 &
 SERVER_PID=$!

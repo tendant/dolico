@@ -32,6 +32,13 @@ type Config struct {
 	OCRThreshold float64
 	// MaxUploadBytes caps a single upload.
 	MaxUploadBytes int64
+	// OCRURL is the PaddleOCR service. When empty the stub OCR tier is used
+	// instead, which keeps the service runnable -- and the tests and the e2e
+	// sweep passing -- with no Python installed.
+	OCRURL string
+	// OCRTimeout bounds a single OCR request. OCR is seconds per page, so this
+	// is far more generous than the shim timeout.
+	OCRTimeout time.Duration
 }
 
 // Load reads configuration from the environment, applying defaults.
@@ -44,6 +51,8 @@ func Load() (*Config, error) {
 		ShimTimeout:    120 * time.Second,
 		OCRThreshold:   0.60,
 		MaxUploadBytes: 256 << 20,
+		OCRURL:         env("DOLICO_OCR_URL", ""),
+		OCRTimeout:     10 * time.Minute,
 	}
 
 	var err error
@@ -60,6 +69,9 @@ func Load() (*Config, error) {
 		return nil, fmt.Errorf("DOLICO_OCR_THRESHOLD must be within 0..1, got %v", c.OCRThreshold)
 	}
 	if c.ShimTimeout, err = envDuration("DOLICO_SHIM_TIMEOUT", c.ShimTimeout); err != nil {
+		return nil, err
+	}
+	if c.OCRTimeout, err = envDuration("DOLICO_OCR_TIMEOUT", c.OCRTimeout); err != nil {
 		return nil, err
 	}
 	maxUpload := c.MaxUploadBytes

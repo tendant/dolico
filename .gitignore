@@ -2,10 +2,18 @@
 /bin/
 /rust/dolico-rs/target/
 
+# Python OCR service. The venv and caches are local; uv.lock is committed so
+# the service resolves identically everywhere.
+/python/ocr-service/.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
 # Repo-local build caches (see the Makefile: builds never touch the shared
-# machine-wide Go cache)
-/.gocache/
-/.gomodcache/
+# machine-wide Go cache). Unanchored, because running a go command from a
+# subdirectory drops one there too.
+.gocache/
+.gomodcache/
 
 # Runtime data. The blob store has no persistence guarantees and defaults under
 # $TMPDIR; this covers the case where DOLICO_DATA_DIR points into the repo.

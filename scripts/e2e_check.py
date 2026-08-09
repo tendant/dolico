@@ -21,9 +21,16 @@ import sys
 import requests
 from jsonschema import Draft202012Validator
 
+import os
+
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 TESTDATA = ROOT / "testdata"
 BASE = sys.argv[1] if len(sys.argv) > 1 else "http://127.0.0.1:8080"
+
+# Which engine should have handled the scanned pages. The OCR tier is optional,
+# so by default the sweep accepts either and only checks that *something* read
+# them; `make e2e-ocr` sets this to "paddleocr" to assert the real one ran.
+EXPECT_OCR = os.environ.get("DOLICO_EXPECT_OCR", "")
 
 PASS, FAIL = "\033[32mPASS\033[0m", "\033[31mFAIL\033[0m"
 failures: list[str] = []
@@ -70,17 +77,28 @@ def engines_used(doc: dict) -> set[str]:
 
 # Each fixture, and what routing must do with it. The PDFs are the interesting
 # rows: they are what the per-page routing design exists for.
+OCR_ENGINES = {"ocr-stub", "paddleocr"}
+# The OCR engine the assertions expect. Unset means "whichever is wired".
+OCR = EXPECT_OCR or None
+
+
+def ocr_engines_in(doc: dict) -> set[str]:
+    return engines_used(doc) & OCR_ENGINES
+
+
 CASES = [
-    # fixture,        min_blocks, expected engines,          forbidden engines
-    ("sample.md",     10, {"anydoc"},                  {"ocr-stub", "pdf-inspector"}),
-    ("sample.txt",     3, {"anydoc"},                  {"ocr-stub", "pdf-inspector"}),
-    ("sample.csv",     1, {"anydoc"},                  {"ocr-stub", "pdf-inspector"}),
-    ("sample.docx",    8, {"anydoc"},                  {"ocr-stub", "pdf-inspector"}),
-    ("sample.xlsx",    2, {"anydoc"},                  {"ocr-stub", "pdf-inspector"}),
-    ("sample.pptx",    4, {"anydoc"},                  {"ocr-stub", "pdf-inspector"}),
-    ("text.pdf",       2, {"pdf-inspector"},           {"ocr-stub"}),
-    ("scanned.pdf",    1, {"ocr-stub"},                {"pdf-inspector"}),
-    ("mixed.pdf",      2, {"pdf-inspector", "ocr-stub"}, set()),
+    # fixture,        min_blocks, expected engines,   forbidden engines
+    ("sample.md",     10, {"anydoc"},        OCR_ENGINES | {"pdf-inspector"}),
+    ("sample.txt",     3, {"anydoc"},        OCR_ENGINES | {"pdf-inspector"}),
+    ("sample.csv",     1, {"anydoc"},        OCR_ENGINES | {"pdf-inspector"}),
+    ("sample.docx",    8, {"anydoc"},        OCR_ENGINES | {"pdf-inspector"}),
+    ("sample.xlsx",    2, {"anydoc"},        OCR_ENGINES | {"pdf-inspector"}),
+    ("sample.pptx",    4, {"anydoc"},        OCR_ENGINES | {"pdf-inspector"}),
+    ("text.pdf",       2, {"pdf-inspector"}, OCR_ENGINES),
+    # The OCR fixtures are checked separately below, because which engine is
+    # acceptable depends on what is wired.
+    ("scanned.pdf",    1, set(),             {"pdf-inspector"}),
+    ("mixed.pdf",      2, {"pdf-inspector"}, set()),
 ]
 
 
@@ -141,10 +159,50 @@ def main() -> int:
 
     # A scanned page that quietly returns nothing is the failure mode this
     # whole design is meant to prevent, so it gets its own explicit check.
-    print("\nscanned.pdf routing detail")
+    print("\nOCR routing")
+    engines = requests.get(f"{BASE}/v1/engines", timeout=10).json()["engines"]
+    wired = next((e["name"] for e in engines if e["name"] in OCR_ENGINES), None)
+    print(f"  OCR tier wired: {wired}")
+    if OCR:
+        check(f"the {OCR} tier is wired", wired == OCR, f"found {wired}")
+
     doc = upload("scanned.pdf").json()
-    ocr_blocks = [b for b in blocks(doc) if b["provenance"]["engine"] == "ocr-stub"]
+    ocr_blocks = [b for b in blocks(doc) if b["provenance"]["engine"] in OCR_ENGINES]
     check("the scanned page produced OCR blocks, not silence", len(ocr_blocks) > 0)
+    if OCR:
+        check(
+            f"the scanned page was read by {OCR}",
+            all(b["provenance"]["engine"] == OCR for b in ocr_blocks),
+            f"engines: {sorted({b['provenance']['engine'] for b in ocr_blocks})}",
+        )
+
+    # mixed.pdf is the design's central claim: page 1 native, page 2 OCR.
+    mixed = upload("mixed.pdf").json()
+    page_engines = [
+        sorted({b["provenance"]["engine"] for b in page["blocks"]})
+        for page in mixed["pages"]
+    ]
+    check("mixed.pdf page 1 was extracted natively", page_engines[0] == ["pdf-inspector"], f"{page_engines}")
+    check("mixed.pdf page 2 went to OCR", set(page_engines[1]) <= OCR_ENGINES, f"{page_engines}")
+
+    if OCR == "paddleocr":
+        # Only real OCR can recover text that exists solely as pixels.
+        text = " ".join(b.get("text", "") for b in blocks(doc)).upper()
+        for word in ("INVOICE", "4471"):
+            check(f"real OCR recovered {word!r} from the pixels", word in text, f"got {text[:120]!r}")
+        # OCR is the only tier that reports a genuine per-block confidence, and
+        # the only one that knows the page size, because it renders.
+        check(
+            "OCR blocks carry confidence and geometry",
+            all(b.get("confidence") is not None and b.get("bbox") for b in ocr_blocks),
+            "a block is missing confidence or bbox",
+        )
+        page = doc["pages"][0]
+        check(
+            "the OCR page reports real dimensions",
+            page.get("width") and page.get("height"),
+            f"width={page.get('width')} height={page.get('height')}",
+        )
 
     print("\nerror paths")
     corrupt = upload("corrupt.pdf")

@@ -26,6 +26,7 @@ import (
 	"github.com/tendant/dolico/internal/config"
 	"github.com/tendant/dolico/internal/engine"
 	"github.com/tendant/dolico/internal/engine/ocrstub"
+	"github.com/tendant/dolico/internal/engine/paddleocr"
 	"github.com/tendant/dolico/internal/engine/quality"
 	"github.com/tendant/dolico/internal/engine/router"
 	"github.com/tendant/dolico/internal/engine/rustshim"
@@ -66,7 +67,10 @@ func run() error {
 		return fmt.Errorf("%w\nbuild it with: make build", err)
 	}
 	native, pdf := rustshim.Engines(shim)
-	ocr := ocrstub.New()
+	ocr, err := ocrEngine(cfg, log)
+	if err != nil {
+		return err
+	}
 	registry := engine.NewRegistry(native, pdf, ocr)
 	pageCache := cache.New(50_000)
 
@@ -98,10 +102,15 @@ func run() error {
 		"data_dir", cfg.DataDir,
 		"workers", cfg.Workers,
 		"shim", shim.Binary(),
+		"ocr_engine", ocr.Name(),
 		"ocr_threshold", cfg.OCRThreshold,
 		"schema_version", canonical.SchemaVersion,
 		"pipeline_version", canonical.PipelineVersion)
 	log.Warn("no persistence: blobs are under a temp directory and jobs are in memory")
+	if ocr.Name() == ocrstub.Name {
+		log.Warn("OCR is stubbed: scanned pages will not be read. " +
+			"Start python/ocr-service and set DOLICO_OCR_URL for real OCR")
+	}
 
 	errs := make(chan error, 1)
 	go func() {
@@ -128,6 +137,29 @@ func run() error {
 		log.Error("worker shutdown", "error", err)
 	}
 	return nil
+}
+
+// ocrEngine returns the real OCR tier when one is configured, and the stub
+// otherwise.
+//
+// The fallback is what keeps this a single-binary service with no Python
+// requirement: `make run`, `make test` and `make e2e` all work with no OCR
+// service present, and scanned pages come back visibly marked as unread rather
+// than silently empty. Setting DOLICO_OCR_URL swaps in the real tier with no
+// other change.
+func ocrEngine(cfg *config.Config, log *slog.Logger) (engine.Engine, error) {
+	if cfg.OCRURL == "" {
+		return ocrstub.New(), nil
+	}
+	ocr, err := paddleocr.New(cfg.OCRURL, paddleocr.WithTimeout(cfg.OCRTimeout))
+	if err != nil {
+		// Configuring an OCR service and then starting without it would mean
+		// silently serving stub text under a configuration that says
+		// otherwise. Refusing to start is the honest failure.
+		return nil, fmt.Errorf("%w\nstart it with: make ocr", err)
+	}
+	log.Info("OCR tier connected", "url", ocr.BaseURL(), "version", ocr.Version())
+	return ocr, nil
 }
 
 // processDocument is the work each job runs: route the document, render the

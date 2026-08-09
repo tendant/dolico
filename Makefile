@@ -1,4 +1,5 @@
-.PHONY: help build build-go build-rust run test test-go test-rust lint fmt e2e testdata clean
+.PHONY: help build build-go build-rust run run-ocr ocr test test-go test-rust test-ocr \
+        lint fmt e2e e2e-ocr testdata clean clean-ocr
 
 # Caches live inside the repo so a build never depends on, or pollutes, the
 # machine's shared Go cache.
@@ -8,6 +9,12 @@ SHIM := rust/dolico-rs/target/release/dolico-rs
 
 HOST ?= 127.0.0.1
 PORT ?= 8080
+
+OCR_DIR := python/ocr-service
+OCR_HOST ?= 127.0.0.1
+OCR_PORT ?= 8181
+OCR_URL ?= http://$(OCR_HOST):$(OCR_PORT)
+UV ?= uv
 
 help:
 	@echo "Dolico -- document processing platform"
@@ -23,6 +30,12 @@ help:
 	@echo "  fmt         gofmt + cargo fmt"
 	@echo "  testdata    Regenerate the binary fixtures in testdata/"
 	@echo "  clean       Remove build output and caches"
+	@echo ""
+	@echo "OCR tier (optional -- without it, scanned pages use the stub):"
+	@echo "  ocr         Run the OCR service on $(OCR_HOST):$(OCR_PORT)"
+	@echo "  run-ocr     Run the API server wired to an OCR service already running"
+	@echo "  test-ocr    Python tests, plus the Go tests against a live OCR service"
+	@echo "  e2e-ocr     End-to-end sweep with real OCR asserted"
 
 build: build-rust build-go
 
@@ -55,8 +68,36 @@ fmt:
 e2e: build
 	@./scripts/e2e.sh
 
+# Asserts that scanned pages were read by the real engine rather than the stub.
+# Requires an OCR service at $(OCR_URL); start one with `make ocr`.
+e2e-ocr: build
+	@DOLICO_OCR_URL=$(OCR_URL) DOLICO_EXPECT_OCR=paddleocr ./scripts/e2e.sh
+
 testdata:
 	@./scripts/gen-testdata.py
 
 clean:
 	@rm -rf bin .gocache .gomodcache rust/dolico-rs/target
+
+# ---------------------------------------------------------------------------
+# OCR tier
+#
+# Optional by design: with no OCR service configured the API falls back to the
+# stub tier, so everything above works with no Python installed. The first
+# `make ocr` downloads the PaddleOCR models (~50MB) into ~/.paddlex.
+# ---------------------------------------------------------------------------
+
+ocr:
+	@$(UV) run --project $(OCR_DIR) uvicorn dolico_ocr.app:app \
+		--host $(OCR_HOST) --port $(OCR_PORT)
+
+run-ocr: build
+	@DOLICO_ADDR=$(HOST):$(PORT) DOLICO_OCR_URL=$(OCR_URL) ./bin/dolico
+
+test-ocr:
+	@$(UV) run --project $(OCR_DIR) --extra dev pytest -q $(OCR_DIR)
+	@echo "--- Go client against the live OCR service at $(OCR_URL) ---"
+	@DOLICO_OCR_URL=$(OCR_URL) $(GO) test -count=1 ./internal/engine/paddleocr/...
+
+clean-ocr:
+	@rm -rf $(OCR_DIR)/.venv

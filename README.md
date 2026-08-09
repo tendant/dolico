@@ -21,7 +21,7 @@ POST /v1/documents ──► blob store (sha256) ──► worker pool
                         │                          ┌───────────────┴───────────────┐
                         │                    text_based                  scanned / image
                         │                          │                              │
-                        │              pdf-inspector extract              OCR engine
+                        │              pdf-inspector extract          PaddleOCR (Python)
                         │                          │                              │
                         └──────────────────────────┴──────────────────────────────┘
                                                     │
@@ -36,20 +36,24 @@ POST /v1/documents ──► blob store (sha256) ──► worker pool
 
 ## Status
 
-This is the first milestone: a complete end-to-end slice with **no
-persistence**. Blobs live under a temp directory, jobs live in a map, and
-restarting the process loses everything. That is deliberate — the point is to
-settle the canonical schema, the `Engine` interface and the routing contracts
-while they are still cheap to change.
+Working end to end, with **no persistence**. Blobs live under a temp directory,
+jobs live in a map, and restarting the process loses everything. That is
+deliberate — the point was to settle the canonical schema, the `Engine`
+interface and the routing contracts while they were still cheap to change.
 
 | Working | Not yet |
 | --- | --- |
-| Per-page PDF classification and routing | Real OCR (the OCR tier is a stub) |
-| Native extraction for 14 formats + Markdown/text | Postgres, MinIO, durable jobs |
-| Canonical JSON as the primary API | NATS, distributed workers |
-| Markdown generated as a view | Vision-LLM fallback, PP-Structure |
-| Bounding boxes, provenance, per-page quality scores | Page rasterization, engine benchmarks |
-| Content-hash caching at page and document level | HTML input |
+| Per-page PDF classification and routing | Postgres, MinIO, durable jobs |
+| Native extraction for 14 formats + Markdown/text | NATS, distributed workers |
+| Real OCR (PaddleOCR), optional and pluggable | PP-StructureV3 layout, vision-LLM fallback |
+| Canonical JSON as the primary API | Engine benchmarks over a real corpus |
+| Markdown generated as a view | HTML input |
+| Bounding boxes, provenance, per-page quality scores | |
+| Content-hash caching at page and document level | |
+
+The OCR tier is optional: with no OCR service configured the API falls back to
+a stub that marks scanned pages as unread rather than silently returning
+nothing, so everything builds, runs and tests with no Python installed.
 
 ## Quick start
 
@@ -60,6 +64,14 @@ make build      # builds bin/dolico and the Rust shim
 make run        # serves on 127.0.0.1:8080
 make test       # Go + Rust test suites
 make e2e        # every fixture through the HTTP API, validated against the schema
+```
+
+With real OCR — two terminals, and `uv` for the Python side:
+
+```bash
+make ocr        # OCR service on 127.0.0.1:8181 (first run fetches ~50MB of models)
+make run-ocr    # the API server, wired to it
+make e2e-ocr    # the sweep again, asserting the real engine read the scans
 ```
 
 ```bash
@@ -74,7 +86,17 @@ curl -F file=@testdata/mixed.pdf 'localhost:8080/v1/documents?wait=true' \
 
 ```json
 {"page": 1, "class": "text_based", "engine": "pdf-inspector", "score": 0.774}
-{"page": 2, "class": "scanned",    "engine": "ocr-stub",      "score": 0.656}
+{"page": 2, "class": "scanned",    "engine": "paddleocr",     "score": 0.663}
+```
+
+Page 2 also comes back with something page 1 lacks — real page dimensions and a
+confidence on every block — because the OCR path renders the page and the
+native path does not:
+
+```json
+{"page": 2, "width": 612, "height": 792,
+ "blocks": [{"text": "SIGNED AGREEMENT", "confidence": 0.993,
+             "bbox": {"x": 60, "y": 726, "width": 52, "height": 7}}]}
 ```
 
 Async, if you would rather not block:
@@ -105,8 +127,8 @@ large, `503` queue full.
 ## How it is put together
 
 **Go** orchestrates: HTTP, routing, caching, storage, normalization, the
-Markdown view. **Rust** parses. There is no Python yet — that is where real OCR
-will go.
+Markdown view. **Rust** parses. **Python** does OCR, which is where the ML
+ecosystem is.
 
 The Rust work is done by two Firecrawl libraries, not by us:
 
@@ -128,12 +150,20 @@ costs a couple of milliseconds against extraction times in the tens. The seam is
 deliberate — `internal/engine/rustshim` is the only code that knows how the shim
 is invoked, so moving to a long-lived service later touches one file.
 
+The OCR tier is the opposite: a long-lived HTTP service, because it holds a
+loaded model and paying to load one per document would dominate everything
+else. Go posts the original bytes plus the page numbers; the service rasterizes
+with `pypdfium2`, which keeps pdfium's native dependency out of both the Go
+binary and the Rust shim. It answers with the same canonical envelope the shim
+writes, so one code path in Go parses both.
+
 ```
 cmd/dolico/                 API server
 internal/canonical/         the canonical model — the contract everything meets
 internal/engine/            Engine interface + registry
         ├── rustshim/       subprocess transport; native and PDF engines
-        ├── ocrstub/        placeholder OCR tier
+        ├── paddleocr/      HTTP client for the OCR tier
+        ├── ocrstub/        fallback OCR tier when none is configured
         ├── quality/        per-page scoring
         └── router/         the routing policy
 internal/blob/              content-addressed filesystem store
@@ -142,6 +172,7 @@ internal/jobs/              in-memory job store + worker pool
 internal/render/            canonical → Markdown
 internal/api/               HTTP handlers
 rust/dolico-rs/             the shim: anydoc + pdf-inspector → canonical JSON
+python/ocr-service/         PaddleOCR over HTTP (see its own README)
 schema/canonical-v1.json    cross-language source of truth
 ```
 
@@ -200,12 +231,21 @@ tagged `estimated_glyph_widths` in its classification reasons.
 | `DOLICO_SHIM_TIMEOUT` | `120s` | bound on one shim invocation |
 | `DOLICO_OCR_THRESHOLD` | `0.60` | page quality below which OCR is tried |
 | `DOLICO_MAX_UPLOAD_BYTES` | `256MiB` | per-upload cap |
+| `DOLICO_OCR_URL` | unset | OCR service address; unset means the stub tier |
+| `DOLICO_OCR_TIMEOUT` | `10m` | bound on one OCR request |
+
+Setting `DOLICO_OCR_URL` to a service that is not reachable is a startup
+failure, not a silent fallback: a deployment configured for OCR that quietly
+serves stub text would be worse than one that refuses to start. The OCR
+service has [its own configuration](python/ocr-service/README.md#configuration).
 
 ## Testing
 
 ```bash
-make test    # 47 Rust tests, ~90 Go tests
-make e2e     # HTTP sweep with JSON Schema validation
+make test      # 48 Rust tests, ~110 Go tests
+make e2e       # HTTP sweep with JSON Schema validation
+make test-ocr  # 50 Python tests, plus the Go client against a live OCR service
+make e2e-ocr   # the sweep again, asserting real OCR read the scanned pages
 ```
 
 The Go tests for `rustshim` and `api` drive the **real** shim against the
@@ -221,14 +261,22 @@ and `mixed.pdf` (one of each), plus `corrupt.pdf` for the error path.
 
 ## Next
 
-The OCR tier is the gap. `internal/engine/ocrstub` implements the real `Engine`
-interface and is wired into the real router, so the whole escalation path is
-exercised — it just returns a synthetic block per page instead of reading
-pixels. Replacing it with a PaddleOCR service means implementing three methods
-over HTTP; the router does not change.
+**Persistence** is now the largest gap. Postgres for jobs and page metadata,
+MinIO behind the existing `blob.Store` interface — nothing outside that package
+knows where bytes live. It also unlocks partial reprocessing after an engine
+upgrade: the page-level cache key already exists, it just has nowhere durable
+to look.
 
-Two things that service will need which the stub does not: **page
-rasterization** — neither Rust library renders, so it should rasterize with
-`pypdfium2` from the original PDF bytes plus the page numbers, keeping pdfium's
-native dependency out of both the shim and the Go binary — and real per-block
-confidences.
+**PP-StructureV3** is the natural second step. Tier 1 gives text lines grouped
+into paragraphs; Tier 2 would give headings, tables and reading order, which is
+what scanned tables need. It slots in as another engine behind the same
+interface.
+
+**Tuning the quality weights** matters more now that escalation costs seconds
+of real work. The weights in `internal/engine/quality` are guesses in a named
+struct so a benchmark can sweep them, but nothing has measured them against a
+real corpus — and the same is true of the OCR model choice, where the default
+was picked on a single synthetic fixture.
+
+Smaller: HTML input, and the page cache clears wholesale at its limit rather
+than evicting LRU (deliberate, and moot once values live in a real store).
