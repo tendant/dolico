@@ -305,6 +305,15 @@ pipeline version + configuration. An engine upgrade re-runs only that engine's
 pages. Above it, a document-level short-circuit skips work entirely when the
 same bytes have already been processed by the current schema and pipeline.
 
+**A document stored during an outage does not count as processed.** When a tier
+is down its pages come back empty and marked `ocr_failed`, and the document is
+still stored — returning a partial document beats failing the request. But the
+short-circuit asks whether the document is *finished*, not merely present, so
+those bytes are reprocessed on the next upload instead of being served the
+outage forever. The line it draws is whether a page is missing content an engine
+was supposed to produce: a page the OCR tier read and found blank is done, a
+page it never managed to read is not.
+
 **pdf-inspector mixes 0- and 1-indexed page numbers** across its API — six
 different functions, not consistently. Everything is normalized to 1-indexed at
 the shim boundary; `rust/dolico-rs/src/pdf.rs` documents the table and has a

@@ -223,7 +223,7 @@ func processDocument(store *blob.Store, rt *router.Router, log *slog.Logger) job
 		// this pipeline and engine set, there is nothing to redo -- this is
 		// the content-hash caching the design calls for, at whole-document
 		// granularity, with the page cache handling partial reuse underneath.
-		if pages, ok := storedPageCount(store, job.DocumentID); ok {
+		if pages, ok := storedPageCount(store, job.DocumentID, log); ok {
 			log.Info("document already processed",
 				"document_id", job.DocumentID, "pages", pages, "trace_id", job.TraceID)
 			return pages, "", nil
@@ -292,7 +292,7 @@ func processDocument(store *blob.Store, rt *router.Router, log *slog.Logger) job
 // A stored document from an older schema or pipeline is treated as absent so
 // it gets reprocessed: serving a document built by different rules than the
 // ones currently in force is worse than doing the work again.
-func storedPageCount(store *blob.Store, docID string) (int, bool) {
+func storedPageCount(store *blob.Store, docID string, log *slog.Logger) (int, bool) {
 	data, err := store.ReadDerived(docID, "canonical.json")
 	if err != nil {
 		return 0, false
@@ -303,6 +303,16 @@ func storedPageCount(store *blob.Store, docID string) (int, bool) {
 	}
 	if doc.SchemaVersion != canonical.SchemaVersion ||
 		doc.Trace.PipelineVersion != canonical.PipelineVersion {
+		return 0, false
+	}
+	// A document stored while a tier was down is a record of that outage, not
+	// a finished document. Without this the content hash makes the outage
+	// permanent for those bytes: every later upload of the same file is served
+	// the empty pages, and the only cures are deleting the document or bumping
+	// the pipeline version.
+	if reason, incomplete := doc.Incomplete(); incomplete {
+		log.Info("reprocessing a document stored with missing pages",
+			"document_id", docID, "reason", reason)
 		return 0, false
 	}
 	if _, err := store.ReadDerived(docID, "document.md"); err != nil {

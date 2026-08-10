@@ -108,16 +108,22 @@ This matters more than it usually would, because there is no database.
 The practical consequence: clients should treat a 404 from `/v1/jobs/{id}` as
 "re-upload", and re-uploading is cheap because it is idempotent by content hash.
 
-**A failed extraction is remembered as a finished one.** This bit during
-deployment testing and is worth knowing before it bites in production. If OCR
-is down or broken, the document still completes — pages come back empty with
-`ocr_failed` in their reasons, which is the correct behaviour for one request.
-But that document is then written to the store, and because the document-level
-short-circuit only asks "have I processed these bytes under this schema and
-pipeline", **re-uploading the same file returns the empty result forever**
-rather than retrying. Recovering means deleting that document from the data
-volume, or bumping `canonical.PipelineVersion`. Worth fixing properly; until
-then, do not let a broken OCR tier stay up.
+**A document stored during an outage is redone, not remembered.** If a tier is
+down the document still completes — pages come back empty with `ocr_failed` in
+their reasons, which is the right answer for that request — and it is written to
+the store like any other. Re-uploading the same bytes reprocesses it rather than
+serving the empty pages again, and the server says so:
+
+```
+INFO reprocessing a document stored with missing pages reason=ocr_failed
+```
+
+Documents that finished properly still short-circuit on the content hash, so a
+re-upload of a good document is still a few milliseconds. The distinction is
+whether a page is missing content an engine was supposed to produce: a page the
+OCR tier *read* and found blank is finished, and a page it never managed to read
+is not. Failed *vision* escalations do not trigger reprocessing either — those
+pages still carry the OCR tier's text.
 
 ## The blob store grows forever
 

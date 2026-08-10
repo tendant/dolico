@@ -106,6 +106,48 @@ type Classification struct {
 	Reasons []string `json:"reasons,omitempty"`
 }
 
+// Reasons a page ended up with no content because an engine could not be run
+// or would not answer, rather than because the page had nothing on it.
+//
+// The distinction matters: a page the OCR tier read and found empty is a
+// finished result, while a page the OCR tier never managed to read is a
+// document waiting to be processed again. `no_text_found`, which the OCR
+// service sets for the first case, is deliberately not in this list.
+const (
+	// ReasonOCRFailed: the OCR tier was asked and returned an error.
+	ReasonOCRFailed = "ocr_failed"
+	// ReasonNoOCREngine: the page needed OCR and none was configured.
+	ReasonNoOCREngine = "no_ocr_engine"
+	// ReasonNotExtracted: no engine produced this page at all.
+	ReasonNotExtracted = "not_extracted"
+)
+
+// Incomplete reports whether some page is missing content that an engine was
+// supposed to produce, and the reason for the first such page.
+//
+// This is what separates "processed" from "finished". A document is stored the
+// moment it has been through the pipeline, including when a tier was down and
+// its pages came back empty -- returning a partial document beats failing the
+// request. But the same bytes uploaded later must not be served that partial
+// result forever, and the content-hash short-circuit cannot tell the
+// difference on its own: to it, a stored document is a stored document.
+//
+// Failures of the *vision* tier deliberately do not count. Those pages still
+// carry the OCR tier's text, so they are a missed improvement rather than a
+// hole, and reprocessing every one of them on every upload would cost the most
+// expensive tier in the pipeline for a page that already has an answer.
+func (d *Document) Incomplete() (string, bool) {
+	for _, page := range d.Pages {
+		for _, reason := range page.Classification.Reasons {
+			switch reason {
+			case ReasonOCRFailed, ReasonNoOCREngine, ReasonNotExtracted:
+				return reason, true
+			}
+		}
+	}
+	return "", false
+}
+
 // BlockType enumerates the block kinds the model can represent.
 type BlockType string
 

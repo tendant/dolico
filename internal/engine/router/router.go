@@ -191,7 +191,7 @@ func (r *Router) Process(ctx context.Context, req Request) (*canonical.Document,
 			log.Warn("pages need OCR but no OCR engine is configured", "pages", todo)
 			for _, number := range todo {
 				if _, ok := byNumber[number]; !ok {
-					byNumber[number] = placeholderPage(number, insp, "no_ocr_engine")
+					byNumber[number] = placeholderPage(number, insp, canonical.ReasonNoOCREngine)
 				}
 			}
 		} else {
@@ -204,7 +204,7 @@ func (r *Router) Process(ctx context.Context, req Request) (*canonical.Document,
 				log.Error("ocr extraction failed", "pages", todo, "error", err)
 				for _, number := range todo {
 					if _, ok := byNumber[number]; !ok {
-						byNumber[number] = placeholderPage(number, insp, "ocr_failed")
+						byNumber[number] = placeholderPage(number, insp, canonical.ReasonOCRFailed)
 					}
 				}
 			default:
@@ -239,7 +239,7 @@ func (r *Router) Process(ctx context.Context, req Request) (*canonical.Document,
 			page, ok := byNumber[number]
 			if !ok {
 				log.Warn("no engine produced this page", "page", number)
-				page = placeholderPage(number, insp, "not_extracted")
+				page = placeholderPage(number, insp, canonical.ReasonNotExtracted)
 			}
 			if page.Quality == nil {
 				q := quality.Score(&page, r.opts.Weights)
