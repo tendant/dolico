@@ -61,14 +61,18 @@ OCR mangles the times (`11:13` for `11:15`, `4t0` for `4 to`), loses word
 boundaries, and turns "Hog flash" into "Ho8nasne". The vision tier misses one
 letter on the whole page.
 
-**And it reports 0.938 confidence while doing it.** That is why `bench-hard`
-forces escalation with `DOLICO_OCR_THRESHOLD=0.99 DOLICO_VISION_THRESHOLD=0.98`
-rather than using the production defaults: with the real thresholds this page
-scores about 0.61 and Tier 3 is never called. The forced run measures what the
-vision tier *can* recover; it is not what the pipeline would do.
+**And it reports 0.938 confidence while doing it.** This page scores about 0.61,
+so no quality threshold below the 0.60 OCR bar could ever select it. When this
+fixture was added, `bench-hard` had to force escalation to measure anything, and
+that gap was recorded here as the finding.
 
-That gap is the finding, not a workaround. Per-page quality scoring catches a
-page OCR gave up on — `testdata/faded.pdf` is that case, and it escalates on the
-real defaults — but it cannot catch a page OCR read wrongly and confidently,
-because every signal available without a second opinion says the page is fine.
-See the vision tier design doc for what would close it.
+It is closed. The disagreement probe reads one page of the document with the
+vision tier and compares: the two engines are 0.089 apart on this page, past the
+0.05 bar, so the OCR tier is distrusted for the whole document. `bench-hard` now
+runs the production defaults and this page recovers — CER 0.091 → 0.005,
+WER 0.540 → 0.016 — because a second engine can say what no signal computed from
+the page itself can.
+
+The general shape still holds and is worth keeping in mind: per-page quality
+scoring catches a page OCR *gave up on* (`testdata/faded.pdf` is that case). It
+takes another engine to catch a page OCR read wrongly and confidently.

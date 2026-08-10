@@ -75,11 +75,13 @@ func run() error {
 	pageCache := cache.New(50_000)
 
 	rt := router.New(registry, ocr, pageCache, router.Options{
-		OCRThreshold:    cfg.OCRThreshold,
-		VisionThreshold: cfg.VisionThreshold,
-		VisionMaxPages:  cfg.VisionMaxPages,
-		Weights:         quality.DefaultWeights,
-		Logger:          log,
+		OCRThreshold:       cfg.OCRThreshold,
+		VisionThreshold:    cfg.VisionThreshold,
+		VisionMaxPages:     cfg.VisionMaxPages,
+		VisionProbe:        cfg.VisionEnabled && cfg.VisionProbe,
+		VisionDisagreement: cfg.VisionDisagreement,
+		Weights:            quality.DefaultWeights,
+		Logger:             log,
 	}).WithVision(visionEngine(cfg, ocr, log))
 
 	jobStore := jobs.NewStore(cfg.Workers, cfg.Workers*16, processDocument(store, rt, log), log)
@@ -199,7 +201,14 @@ func visionEngine(cfg *config.Config, ocr engine.Engine, log *slog.Logger) engin
 	log.Info("vision tier connected",
 		"engine", v.Name(),
 		"threshold", cfg.VisionThreshold,
-		"max_pages", cfg.VisionMaxPages)
+		"max_pages", cfg.VisionMaxPages,
+		"probe", cfg.VisionProbe,
+		"disagreement", cfg.VisionDisagreement)
+	if cfg.VisionProbe {
+		log.Info("vision probe on: every document with scanned pages pays one " +
+			"vision call, and disagreement escalates the rest. " +
+			"Set DOLICO_VISION_PROBE=0 to escalate only on the quality threshold")
+	}
 	return v
 }
 

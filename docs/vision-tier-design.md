@@ -281,10 +281,61 @@ at all — before it, no OCR page with text on it could score below 0.55, so no
 threshold under the 0.60 OCR bar could select one. That fix is real and it is
 what makes `faded.pdf` escalate. It does not touch the third row.
 
-Closing that would take a second opinion rather than a better signal: a cheap
-disagreement check between two engines on the same page, or a lexicon, which
-this pipeline has deliberately avoided because it is language-specific. Both
-are larger than a threshold change, and neither is in this design.
+**The third row is now handled too, by the probe below** — which is the second
+opinion this section said it would take, since no signal computed from the page
+alone can ever reach it.
+
+## The disagreement probe
+
+For every document that used OCR, the worst-scoring OCR page is read once by
+the vision tier and the two results are compared. Below the bar they agree, the
+probe is discarded and the document keeps one engine throughout. Above it, the
+OCR tier is distrusted for the *whole document* and the remaining OCR pages are
+escalated too, up to the same cap — on the reasoning that a scan bad enough to
+fool OCR on one page is rarely fine on the others.
+
+The metric is a normalized character edit distance (`quality.Disagreement`),
+and the 0.05 default comes from measurement rather than taste:
+
+| page | tier disagreement | |
+| --- | --- | --- |
+| `scanned.pdf` | 0.000 | the engines agree to the character |
+| `scanned-table.pdf` | 0.013 | |
+| `mixed.pdf` p2 | 0.034 | worst page where they agree |
+| — | **0.05** | the bar |
+| `radio-1922.pdf` | 0.092 | OCR misread it at 0.938 confidence |
+| `faded.pdf` | 1.000 | OCR returned one character |
+
+Word-level distance separates too, but less: 0.400 against 0.739, where
+character distance has 0.034 against 0.092.
+
+**What it costs and what it buys**, measured both ways on both corpora:
+
+| | probe off | probe on |
+| --- | --- | --- |
+| default corpus, mean CER | 0.0088 | 0.0088 |
+| default corpus, wall time | 25.2s | 34.2s |
+| `radio-1922.pdf` CER / WER | 0.091 / 0.540 | **0.005 / 0.016** |
+| `radio-1922.pdf` wall time | 7.8s | 12.4s |
+
+So it is a fixed toll — roughly 4–5s per document with scanned pages, +36% on a
+corpus where nothing needed it — bought against recovering documents that no
+threshold could have found. On the default corpus that is pure cost, because
+every fixture there is either read correctly or already caught by the
+threshold. That is the honest shape of it: the probe is insurance, and the
+premium is charged on every document.
+
+`DOLICO_VISION_PROBE=0` turns it off and leaves the threshold as the only route
+to Tier 3, which is what every deployment had before it existed.
+
+### Why the probe result is discarded when it agrees
+
+A probe that agrees has still produced a perfectly good page, and throwing it
+away looks wasteful. It is deliberate: applying it would leave one arbitrary
+page of an otherwise-consistent document rendered by a different engine, with
+different structure conventions and no confidence values, for no measurable
+gain — the two texts agreed to within 3%. Consistency is worth more than the
+few characters.
 
 ## Should MinerU be Tier 2?
 
@@ -327,12 +378,14 @@ exactly what disqualify it as Tier 2:
 - **There would be nothing to escalate *to*.** The tier structure exists to give
   a failed page a second chance from a different kind of engine. Spend the best
   engine first and a failure is final.
-- **It invents tables.** `faded.pdf` and `radio-1922.pdf` are columns of plain
-  text, and MinerU returns both as `table` blocks. The CER numbers above hide
-  this, because the text scorer walks into table cells by design. As Tier 3 on a
-  page that was otherwise lost, a spurious grid is a small price. As the default
-  for every scanned page, it puts structure into the canonical model that is not
-  in the document — which is the thing this pipeline refuses to do elsewhere.
+- **It invented tables.** `faded.pdf` and `radio-1922.pdf` are columns of plain
+  text, and MinerU returned both as `table` blocks — structure the documents do
+  not have, which is the thing this pipeline refuses to put in the canonical
+  model. *Fixed since*: every spurious grid turned out to be single-column (8×1
+  and 9×1, against 5×3 for the fixture that really is a table), so the adapter
+  flattens one-column tables into paragraphs. This one no longer counts against
+  promotion — but it was the objection that had to go before Tier 3 could be
+  run more often, which is what actually happened.
 
 So the finding is real and the tiering stays. What it actually argues for is
 raising how often Tier 3 runs, not promoting it: on this corpus it would have

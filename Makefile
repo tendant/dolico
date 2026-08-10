@@ -110,14 +110,13 @@ bench-vision: build
 # Real scans, whose ground truth is transcribed rather than generated. Kept out
 # of the default corpus for exactly that reason.
 #
-# The thresholds are forced because the real scan does not trip the real ones:
-# PaddleOCR misreads that page and reports 0.938 confidence, so it scores about
-# 0.61 and Tier 3 is never called. This run measures what the vision tier can
-# recover from a real scan, not what the pipeline would do with one -- see
-# testdata/corpus-hard/PROVENANCE.md.
+# This used to force the thresholds, because the real scan did not trip the
+# real ones: PaddleOCR misreads that page and reports 0.938 confidence, so it
+# scores about 0.61 and no legal threshold selected it. The disagreement probe
+# catches it on the production defaults, so the forcing is gone and this now
+# measures what the pipeline actually does.
 bench-hard: build
 	@DOLICO_OCR_URL=$(OCR_URL) DOLICO_VISION_ENABLED=1 \
-		DOLICO_OCR_THRESHOLD=0.99 DOLICO_VISION_THRESHOLD=0.98 \
 		./scripts/bench.sh --corpus testdata/corpus-hard $(BENCH_ARGS)
 
 testdata:

@@ -117,6 +117,69 @@ class TestTables:
         assert out["blocks"] == []
 
 
+class TestSingleColumnTables:
+    """MinerU returns narrow columns of ordinary text as Nx1 tables.
+
+    Measured on the repository's own fixtures: the faded receipt comes back as
+    8x1 and the 1922 newspaper column as 9x1, while the fixture that really is
+    a table comes back as 5x3. Emitting the first two as tables would put
+    structure into the canonical model that the documents do not have.
+    """
+
+    ONE_COL = (
+        "<table><tr><td>SHIPPING RECEIPT</td></tr>"
+        "<tr><td>Consignment 8842-QX</td></tr>"
+        "<tr><td>Total due 1,420.75</td></tr></table>"
+    )
+
+    def test_a_one_column_table_becomes_paragraphs(self):
+        out = build([block("table", self.ONE_COL)])
+        assert [b["type"] for b in out["blocks"]] == ["paragraph"] * 3
+        assert [b["text"] for b in out["blocks"]] == [
+            "SHIPPING RECEIPT",
+            "Consignment 8842-QX",
+            "Total due 1,420.75",
+        ]
+
+    def test_the_flattened_paragraphs_keep_ids_and_provenance(self):
+        out = build([block("table", self.ONE_COL)])
+        assert [b["id"] for b in out["blocks"]] == ["p1-vis0-r0", "p1-vis0-r1", "p1-vis0-r2"]
+        assert all(b["provenance"]["engine"] == ENGINE_NAME for b in out["blocks"])
+        # The label stays visible: this text arrived as a table and was flattened.
+        assert all("table" in b["provenance"]["method"] for b in out["blocks"])
+
+    def test_no_geometry_is_invented_for_the_rows(self):
+        # MinerU measured the region, not the rows in it. Handing every
+        # paragraph the region's rectangle would be several identical
+        # overlapping boxes no engine ever measured.
+        out = build([block("table", self.ONE_COL)])
+        assert all("bbox" not in b for b in out["blocks"])
+
+    def test_a_real_table_is_untouched(self):
+        out = build([block("table", TABLE_HTML)])
+        assert len(out["blocks"]) == 1
+        assert out["blocks"][0]["type"] == "table"
+        assert out["blocks"][0]["bbox"] is not None
+
+    def test_a_single_row_of_several_columns_is_still_a_table(self):
+        # One row is not the same shape of mistake: a 1xN grid does carry
+        # column structure, and nothing here has been measured saying it does
+        # not, so it is left alone.
+        out = build([block("table", "<table><tr><td>a</td><td>b</td></tr></table>")])
+        assert out["blocks"][0]["type"] == "table"
+
+    def test_empty_rows_do_not_become_empty_paragraphs(self):
+        out = build([block(
+            "table",
+            "<table><tr><td>real</td></tr><tr><td></td></tr><tr><td>  </td></tr></table>",
+        )])
+        assert [b["text"] for b in out["blocks"]] == ["real"]
+
+    def test_a_flattened_page_still_reads_as_vision_output(self):
+        out = build([block("table", self.ONE_COL)])
+        assert out["classification"]["reasons"] == ["ocr", "vision"]
+
+
 class TestPage:
     def test_pages_are_marked_as_vision_read(self):
         out = build([block("text")])

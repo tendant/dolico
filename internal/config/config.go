@@ -9,6 +9,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/tendant/dolico/internal/engine/quality"
 )
 
 // Config is the whole service configuration. Every field has a working
@@ -56,6 +58,16 @@ type Config struct {
 	VisionThreshold float64
 	// VisionMaxPages bounds vision escalation per document.
 	VisionMaxPages int
+	// VisionProbe asks the vision tier about one page of every document that
+	// used OCR, and escalates the rest when the two tiers disagree about it.
+	// On by default once the vision tier is enabled at all: the threshold
+	// alone only catches OCR that knows it struggled, and the measured case
+	// is OCR misreading half a page at 0.938 confidence. Costs one vision
+	// call per document with scanned pages.
+	VisionProbe bool
+	// VisionDisagreement is how far apart the two tiers must be on the probed
+	// page before the OCR tier is distrusted for the whole document.
+	VisionDisagreement float64
 }
 
 // Load reads configuration from the environment, applying defaults.
@@ -70,9 +82,11 @@ func Load() (*Config, error) {
 		MaxUploadBytes: 256 << 20,
 		OCRURL:          env("DOLICO_OCR_URL", ""),
 		OCRTimeout:      10 * time.Minute,
-		VisionEnabled:   envBool("DOLICO_VISION_ENABLED", false),
-		VisionThreshold: 0.35,
-		VisionMaxPages:  5,
+		VisionEnabled:      envBool("DOLICO_VISION_ENABLED", false),
+		VisionThreshold:    0.35,
+		VisionMaxPages:     5,
+		VisionProbe:        envBool("DOLICO_VISION_PROBE", true),
+		VisionDisagreement: quality.DefaultDisagreement,
 	}
 
 	var err error
@@ -118,6 +132,16 @@ func Load() (*Config, error) {
 	}
 	if c.VisionMaxPages < 1 {
 		return nil, fmt.Errorf("DOLICO_VISION_MAX_PAGES must be at least 1, got %d", c.VisionMaxPages)
+	}
+	if c.VisionDisagreement, err = envFloat(
+		"DOLICO_VISION_DISAGREEMENT", c.VisionDisagreement); err != nil {
+		return nil, err
+	}
+	if c.VisionDisagreement <= 0 || c.VisionDisagreement > 1 {
+		// Zero would escalate every document that used OCR, since no two
+		// engines agree to the character on every page.
+		return nil, fmt.Errorf(
+			"DOLICO_VISION_DISAGREEMENT must be within (0..1], got %v", c.VisionDisagreement)
 	}
 	maxUpload := c.MaxUploadBytes
 	if maxUpload, err = envInt64("DOLICO_MAX_UPLOAD_BYTES", maxUpload); err != nil {

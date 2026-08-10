@@ -747,6 +747,264 @@ func TestTheMeasurementIsRecordedOnThePage(t *testing.T) {
 	}
 }
 
+// ---------------------------------------------------------------------------
+// The disagreement probe
+//
+// The threshold can only catch OCR that knows it struggled. These cover the
+// case it cannot: OCR returning plausible text, confidently, that a second
+// engine reads completely differently.
+// ---------------------------------------------------------------------------
+
+// misread is word-shaped, damage-free, high-scoring — and nothing like what
+// the vision tier reads on the same page.
+const misread = "Rcglon Unlts Rcvcnuc Nortb l2O l4,4OO.OO Soutb 8b lO,32O.OO Eest 2O3"
+
+func probeRouter(t *testing.T, primary, ocr, vision engine.Engine, opts func(*Options)) *Router {
+	t.Helper()
+	return visionRouter(t, primary, ocr, vision, func(o *Options) {
+		o.VisionProbe = true
+		if opts != nil {
+			opts(o)
+		}
+	})
+}
+
+func TestTheProbeEscalatesAConfidentMisreadTheThresholdCannotSee(t *testing.T) {
+	primary := &fakeEngine{
+		name: "pdf", version: "1", support: engine.SupportNative,
+		inspection: inspection("pdf", canonical.PageTypeScanned),
+	}
+	// High confidence, so it scores well above the 0.35 vision threshold.
+	ocr := &fakeEngine{name: "ocr", version: "1", inspectErr: engine.ErrUnsupported,
+		text: map[int]string{1: misread}, confidence: map[int]float64{1: 0.94}}
+	vision := &fakeEngine{name: "mineru", version: "2.5", inspectErr: engine.ErrUnsupported,
+		text: map[int]string{1: clean}}
+
+	doc, err := probeRouter(t, primary, ocr, vision, nil).Process(context.Background(), request())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if q := doc.Pages[0].Quality; q == nil || q.Score < 0.35 {
+		t.Fatalf("this case needs a page the threshold would not select, got %+v", q)
+	}
+	if len(vision.calls) == 0 {
+		t.Fatal("the probe never ran")
+	}
+	if got := doc.Pages[0].Blocks[0].Provenance.Engine; got != "mineru" {
+		t.Errorf("page engine = %s; the probe disagreed and should have replaced it", got)
+	}
+	if !hasReason(doc.Pages[0], "vision_probe") {
+		t.Errorf("the probed page should say so: %v", doc.Pages[0].Classification.Reasons)
+	}
+}
+
+// The other half: when the tiers agree, the probe costs one call and changes
+// nothing. Discarding rather than applying keeps one engine across a document
+// whose OCR was fine.
+func TestAnAgreeingProbeIsDiscarded(t *testing.T) {
+	primary := &fakeEngine{
+		name: "pdf", version: "1", support: engine.SupportNative,
+		inspection: inspection("pdf", canonical.PageTypeScanned, canonical.PageTypeScanned),
+	}
+	ocr := &fakeEngine{name: "ocr", version: "1", inspectErr: engine.ErrUnsupported,
+		text:       map[int]string{1: clean, 2: clean},
+		confidence: map[int]float64{1: 0.95, 2: 0.95}}
+	vision := &fakeEngine{name: "mineru", version: "2.5", inspectErr: engine.ErrUnsupported,
+		text: map[int]string{1: clean, 2: clean}}
+
+	doc, err := probeRouter(t, primary, ocr, vision, nil).Process(context.Background(), request())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(vision.calls) != 1 || len(vision.calls[0]) != 1 {
+		t.Errorf("the probe should be exactly one page, got %v", vision.calls)
+	}
+	for _, p := range doc.Pages {
+		if got := p.Blocks[0].Provenance.Engine; got != "ocr" {
+			t.Errorf("page %d came from %s; an agreeing probe must change nothing", p.Number, got)
+		}
+	}
+}
+
+// The point of probing one page and escalating the document: a scan bad enough
+// to fool OCR on one page is usually bad throughout, including on pages that
+// scored well.
+func TestDisagreementEscalatesPagesThatScoredFine(t *testing.T) {
+	kinds := []canonical.PageType{
+		canonical.PageTypeScanned, canonical.PageTypeScanned, canonical.PageTypeScanned,
+	}
+	primary := &fakeEngine{
+		name: "pdf", version: "1", support: engine.SupportNative,
+		inspection: inspection("pdf", kinds...),
+	}
+	ocr := &fakeEngine{name: "ocr", version: "1", inspectErr: engine.ErrUnsupported,
+		text:       map[int]string{1: misread, 2: misread, 3: misread},
+		confidence: map[int]float64{1: 0.90, 2: 0.94, 3: 0.94}}
+	vision := &fakeEngine{name: "mineru", version: "2.5", inspectErr: engine.ErrUnsupported,
+		text: map[int]string{1: clean, 2: clean, 3: clean}}
+
+	doc, err := probeRouter(t, primary, ocr, vision, nil).Process(context.Background(), request())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range doc.Pages {
+		if got := p.Blocks[0].Provenance.Engine; got != "mineru" {
+			t.Errorf("page %d came from %s, want mineru", p.Number, got)
+		}
+	}
+	// Page 1 scored worst, so it is the probe; the other two follow in one
+	// request rather than one each.
+	if len(vision.calls) != 2 {
+		t.Fatalf("expected a probe then a batch, got %v", vision.calls)
+	}
+	if !slices.Equal(vision.calls[0], []int{1}) {
+		t.Errorf("the probe should be the worst-scoring page, got %v", vision.calls[0])
+	}
+	if !slices.Equal(vision.calls[1], []int{2, 3}) {
+		t.Errorf("the follow-up should be the remaining pages, got %v", vision.calls[1])
+	}
+}
+
+// The probe already paid for one page. Asking for it twice would buy the same
+// inference again.
+func TestTheProbedPageIsNotRequestedTwice(t *testing.T) {
+	primary := &fakeEngine{
+		name: "pdf", version: "1", support: engine.SupportNative,
+		inspection: inspection("pdf", canonical.PageTypeScanned, canonical.PageTypeScanned),
+	}
+	ocr := &fakeEngine{name: "ocr", version: "1", inspectErr: engine.ErrUnsupported,
+		text:       map[int]string{1: misread, 2: misread},
+		confidence: map[int]float64{1: 0.90, 2: 0.95}}
+	vision := &fakeEngine{name: "mineru", version: "2.5", inspectErr: engine.ErrUnsupported,
+		text: map[int]string{1: clean, 2: clean}}
+
+	if _, err := probeRouter(t, primary, ocr, vision, nil).Process(context.Background(), request()); err != nil {
+		t.Fatal(err)
+	}
+	seen := map[int]int{}
+	for _, call := range vision.calls {
+		for _, n := range call {
+			seen[n]++
+		}
+	}
+	if seen[1] != 1 {
+		t.Errorf("page 1 was sent to the vision tier %d times, want 1 (%v)", seen[1], vision.calls)
+	}
+}
+
+// A probe is a question, not a target. Failing to answer it must not mark a
+// page as having failed, and must leave the threshold path working.
+func TestAFailedProbeFallsBackToTheThreshold(t *testing.T) {
+	primary := &fakeEngine{
+		name: "pdf", version: "1", support: engine.SupportNative,
+		inspection: inspection("pdf", canonical.PageTypeScanned),
+	}
+	ocr := &fakeEngine{name: "ocr", version: "1", inspectErr: engine.ErrUnsupported,
+		text: map[int]string{1: clean}, confidence: map[int]float64{1: 0.95}}
+	vision := &fakeEngine{name: "mineru", version: "2.5", inspectErr: engine.ErrUnsupported,
+		extractErr: errors.New("mineru fell over")}
+
+	doc, err := probeRouter(t, primary, ocr, vision, nil).Process(context.Background(), request())
+	if err != nil {
+		t.Fatalf("a failed probe must not fail the document: %v", err)
+	}
+	if got := doc.Pages[0].Blocks[0].Provenance.Engine; got != "ocr" {
+		t.Errorf("engine = %s, want the OCR result to stand", got)
+	}
+	if hasReason(doc.Pages[0], "vision_failed") {
+		t.Error("a page that was probed, not targeted, must not be marked failed")
+	}
+}
+
+func TestTheProbeRespectsTheMaxPagesCap(t *testing.T) {
+	kinds := make([]canonical.PageType, 6)
+	text := map[int]string{}
+	conf := map[int]float64{}
+	vtext := map[int]string{}
+	for i := range kinds {
+		kinds[i] = canonical.PageTypeScanned
+		text[i+1] = misread
+		conf[i+1] = 0.90 + float64(i)/200 // page 1 worst, so it is the probe
+		vtext[i+1] = clean
+	}
+	primary := &fakeEngine{
+		name: "pdf", version: "1", support: engine.SupportNative,
+		inspection: inspection("pdf", kinds...),
+	}
+	ocr := &fakeEngine{name: "ocr", version: "1", inspectErr: engine.ErrUnsupported,
+		text: text, confidence: conf}
+	vision := &fakeEngine{name: "mineru", version: "2.5", inspectErr: engine.ErrUnsupported,
+		text: vtext}
+
+	r := probeRouter(t, primary, ocr, vision, func(o *Options) { o.VisionMaxPages = 3 })
+	if _, err := r.Process(context.Background(), request()); err != nil {
+		t.Fatal(err)
+	}
+	seen := map[int]bool{}
+	for _, call := range vision.calls {
+		for _, n := range call {
+			seen[n] = true
+		}
+	}
+	if len(seen) != 3 {
+		t.Errorf("the cap should have limited this to 3 pages, got %v", vision.calls)
+	}
+}
+
+func TestNoProbeWithoutAVisionEngine(t *testing.T) {
+	primary := &fakeEngine{
+		name: "pdf", version: "1", support: engine.SupportNative,
+		inspection: inspection("pdf", canonical.PageTypeScanned),
+	}
+	ocr := &fakeEngine{name: "ocr", version: "1", inspectErr: engine.ErrUnsupported,
+		text: map[int]string{1: clean}, confidence: map[int]float64{1: 0.95}}
+
+	if _, err := probeRouter(t, primary, ocr, nil, nil).Process(context.Background(), request()); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// Documents that never used OCR must not pay for a probe.
+func TestANativeDocumentIsNotProbed(t *testing.T) {
+	primary := &fakeEngine{
+		name: "pdf", version: "1", support: engine.SupportNative,
+		inspection: inspection("pdf", canonical.PageTypeTextBased),
+		text:       map[int]string{1: clean},
+	}
+	vision := &fakeEngine{name: "mineru", version: "2.5", inspectErr: engine.ErrUnsupported}
+
+	if _, err := probeRouter(t, primary, nil, vision, nil).Process(context.Background(), request()); err != nil {
+		t.Fatal(err)
+	}
+	if len(vision.calls) != 0 {
+		t.Errorf("a document with no OCR pages was probed: %v", vision.calls)
+	}
+}
+
+// With the probe off, the threshold is the only route to Tier 3 — the
+// behaviour every deployment had before this existed.
+func TestProbeOffLeavesTheThresholdAlone(t *testing.T) {
+	primary := &fakeEngine{
+		name: "pdf", version: "1", support: engine.SupportNative,
+		inspection: inspection("pdf", canonical.PageTypeScanned),
+	}
+	ocr := &fakeEngine{name: "ocr", version: "1", inspectErr: engine.ErrUnsupported,
+		text: map[int]string{1: misread}, confidence: map[int]float64{1: 0.94}}
+	vision := &fakeEngine{name: "mineru", version: "2.5", inspectErr: engine.ErrUnsupported,
+		text: map[int]string{1: clean}}
+
+	doc, err := visionRouter(t, primary, ocr, vision, nil).Process(context.Background(), request())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(vision.calls) != 0 {
+		t.Errorf("vision ran with the probe off and the page above threshold: %v", vision.calls)
+	}
+	if got := doc.Pages[0].Blocks[0].Provenance.Engine; got != "ocr" {
+		t.Errorf("engine = %s, want ocr", got)
+	}
+}
+
 func TestNoVisionEngineIsATwoTierRun(t *testing.T) {
 	primary := &fakeEngine{
 		name: "pdf", version: "1", support: engine.SupportNative,

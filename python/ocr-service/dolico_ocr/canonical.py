@@ -314,11 +314,9 @@ def vision_page_payload(
     """
     out_blocks: list[dict] = []
     for index, block in enumerate(blocks):
-        built = _vision_block(
+        out_blocks.extend(_vision_block(
             block, index, page_number, page_width_pt, page_height_pt, engine_version, backend
-        )
-        if built is not None:
-            out_blocks.append(built)
+        ))
 
     reasons = ["ocr", "vision"] if out_blocks else ["ocr", "vision", "no_text_found"]
     return {
@@ -346,7 +344,11 @@ def _vision_block(
     height_pt: float,
     engine_version: str,
     backend: str,
-) -> dict | None:
+) -> list[dict]:
+    """Convert one MinerU block. Usually one canonical block, sometimes several.
+
+    Several because a single-column "table" is not a table -- see below.
+    """
     block_type = MINERU_LABEL_TO_TYPE.get(block.label, "paragraph")
     block_id = f"p{page_number}-vis{index}"
     provenance = {
@@ -366,7 +368,18 @@ def _vision_block(
     if block_type == "table":
         grid, header_rows = parse_table_html(block.text)
         if not grid:
-            return None
+            return []
+        if max((len(row) for row in grid), default=0) <= 1:
+            # A one-column table is a stack of paragraphs wearing a grid.
+            #
+            # MinerU does this to ordinary text set in a narrow column: the
+            # repository's faded receipt comes back as 8x1 and the 1922
+            # newspaper column as 9x1, while the fixture that really is a table
+            # comes back as 5x3. Emitting them as tables would put structure
+            # into the canonical model that is not in the document, which is
+            # the one thing this pipeline refuses to do -- and it would do it
+            # on exactly the pages the vision tier exists to rescue.
+            return _flatten_single_column(grid, block_id, provenance)
         out["table"] = {
             "header_rows": header_rows,
             "kind": "data",
@@ -380,7 +393,7 @@ def _vision_block(
     else:
         text = " ".join(block.text.split())
         if not text:
-            return None
+            return []
         out["text"] = text
         if block_type == "heading":
             out["level"] = block.text_level or 2
@@ -388,6 +401,29 @@ def _vision_block(
             # MinerU marks headings with text_level on an ordinary text block.
             out["type"] = "heading"
             out["level"] = min(max(block.text_level, 1), 6)
+    return [out]
+
+
+def _flatten_single_column(grid: list, block_id: str, provenance: dict) -> list[dict]:
+    """One paragraph per row of a table that has only one column.
+
+    No bounding box on any of them. MinerU measured the region, not the rows
+    inside it, and giving every paragraph the region's rectangle would hand a
+    consumer several identical overlapping boxes that no engine ever measured.
+    Absent geometry is recoverable; invented geometry is not.
+    """
+    out = []
+    for r, row in enumerate(grid):
+        slot = row[0] if row else {}
+        text = " ".join(str(slot.get("text", "")).split())
+        if not text or "covered_by" in slot:
+            continue
+        out.append({
+            "id": f"{block_id}-r{r}",
+            "type": "paragraph",
+            "text": text,
+            "provenance": provenance,
+        })
     return out
 
 

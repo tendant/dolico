@@ -120,7 +120,12 @@ because GFM cannot express a headerless table — that is a rendering
 concession, and the JSON stays exact.
 
 **Tier 3** reads the page image directly with MinerU2.5, a 1.2B vision model,
-and returns the same block types. Its geometry arrives normalized to a
+and returns the same block types — except that a table with one column comes
+back as paragraphs. MinerU labels narrow columns of ordinary text as tables:
+the faded receipt arrives as 8×1 and the 1922 newspaper column as 9×1, while
+the fixture that really is a table arrives as 5×3. A one-column grid carries no
+structure a stack of paragraphs does not, so it is flattened rather than
+passed on as structure the document never had. Its geometry arrives normalized to a
 0–1000 box measured from the top-left, so this service scales it to the page's
 point size and flips the vertical axis — the same conversion the OCR tiers do
 from pixels, and wrong in the same visually-plausible way if skipped.
@@ -143,7 +148,9 @@ Two things both OCR tiers provide that no other engine in the pipeline can:
   It is worth knowing how far that goes. On `testdata/corpus-hard/radio-1922.pdf`,
   a real microfilm scan, Tier 2 gets 54% of the words wrong and reports **0.938
   confidence**. Low confidence means the page is bad; high confidence does not
-  mean it is good.
+  mean it is good. That asymmetry is why the router also asks Tier 3 to read one
+  page of every OCR'd document and compares the two — the only way to catch a
+  confident misread is another engine.
 - **Real page geometry.** `pdf-inspector` does not expose page dimensions, so
   natively-extracted PDF pages carry none. This service renders, so it knows.
 

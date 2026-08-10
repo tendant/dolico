@@ -45,8 +45,9 @@ interface and the routing contracts while they were still cheap to change.
 | --- | --- |
 | Per-page PDF classification and routing | Postgres, MinIO, durable jobs |
 | Native extraction for 14 formats + Markdown/text | NATS, distributed workers |
-| Real OCR in two tiers, optional and pluggable | Catching OCR that is wrong *and* confident |
-| A vision-model third tier for pages OCR loses | A benchmark corpus larger than one real scan |
+| Real OCR in two tiers, optional and pluggable | A benchmark corpus larger than one real scan |
+| A vision-model third tier for pages OCR loses | Remote MinerU (`DOLICO_MINERU_URL` is written but untested) |
+| Cross-engine disagreement to catch confident misreads | |
 | Layout analysis: scanned tables come back as grids | HTML input |
 | Canonical JSON as the primary API | |
 | Markdown generated as a view | |
@@ -258,14 +259,26 @@ an empty read the OCR result stands and the page is tagged `vision_failed` or
 [`docs/vision-tier-design.md`](docs/vision-tier-design.md) records why MinerU
 rather than a hosted vision LLM, and what that choice costs.
 
-**The trigger is weaker than the tier, and the corpus proves it.** On a real
-1922 newspaper scan the OCR tier gets 54% of the words wrong — `11:13` for
+**A second engine is what catches OCR that is wrong and sure of itself.** On a
+real 1922 newspaper scan the OCR tier gets 54% of the words wrong — `11:13` for
 `11:15`, `Ho8nasne` for `Hog flash` — and reports **0.938 confidence** while
-doing it. The vision tier reads the same page at 1.6% word error. But nothing
-in the pipeline can tell: a page that was read *confidently and wrongly* looks
-identical to one read correctly. Escalation catches the page OCR gave up on,
-not the page OCR got wrong. Closing that needs a second opinion, not a better
-threshold.
+doing it. That page scores 0.61, so no threshold below the 0.60 OCR bar could
+ever select it, and no signal computed from the page disagrees with the engine
+that produced it.
+
+So one page of every document that used OCR is read again by the vision tier
+and the two results are compared. Agree, and the probe is discarded and the
+document keeps one engine throughout. Disagree past
+`DOLICO_VISION_DISAGREEMENT`, and the OCR tier is distrusted for the *whole*
+document — a scan bad enough to fool OCR on one page is rarely fine on the
+others. The 0.05 default sits in a measured gap: the worst page where the two
+tiers agreed scored 0.034, the best page where they genuinely disagreed scored
+0.092.
+
+It is a fixed toll, and the README should say so plainly: about 4–5s per
+document with scanned pages, +36% wall time on a corpus where nothing needed
+it, in exchange for `radio-1922.pdf` going from 0.540 word error to 0.016.
+`DOLICO_VISION_PROBE=0` turns it off.
 
 **OCR parallelism is processes, not threads.** One inference uses about one
 core and scales with neither Paddle's intra-op threading nor Python threads —
@@ -309,6 +322,8 @@ tagged `estimated_glyph_widths` in its classification reasons.
 | `DOLICO_VISION_ENABLED` | off | escalate bad OCR pages to the vision tier |
 | `DOLICO_VISION_THRESHOLD` | `0.35` | page quality below which vision is tried |
 | `DOLICO_VISION_MAX_PAGES` | `5` | vision escalations per document |
+| `DOLICO_VISION_PROBE` | on | read one page of every OCR'd document with the vision tier and compare |
+| `DOLICO_VISION_DISAGREEMENT` | `0.05` | how far the tiers must differ before OCR is distrusted document-wide |
 
 Setting `DOLICO_OCR_URL` to a service that is not reachable is a startup
 failure, not a silent fallback: a deployment configured for OCR that quietly
@@ -323,9 +338,9 @@ recovery path is missing would trade a small loss for a total one.
 ## Testing
 
 ```bash
-make test       # 48 Rust tests, ~174 Go tests
+make test       # 48 Rust tests, ~193 Go tests
 make e2e        # HTTP sweep with JSON Schema validation
-make test-ocr   # 141 Python tests, plus the Go client against a live OCR service
+make test-ocr   # 148 Python tests, plus the Go client against a live OCR service
 make e2e-ocr    # the sweep again, asserting real OCR read the scanned pages
 make e2e-vision # ...and that faded.pdf escalated to the vision tier and was recovered
 make bench-ocr  # score extraction against ground truth
@@ -411,13 +426,17 @@ is scoring eight generated documents and one real scan. Point `--corpus` at a
 real collection and the model choice, the escalation threshold, and the four
 weights in `internal/engine/quality` become measurable rather than argued.
 
-**A second opinion** is the next real gap, and the corpus now shows why. The
-escalation catches a page OCR gave up on; it cannot catch a page OCR read
-wrongly at 0.938 confidence, because no signal computable from that page
-disagrees with the engine. The cheap version is to run a second engine on a
-sample of pages and escalate on disagreement rather than on self-doubt — which
-costs a second pass on pages that are probably fine, and is the first thing in
-this pipeline that would need a policy rather than a threshold.
+**Tuning the probe** is what the disagreement check needs next. It works — the
+real scan recovers on production defaults — but its threshold, and the decision
+to escalate a whole document from one page, rest on five pages of evidence. The
+open questions are all measurable with a bigger corpus: how often it fires on
+documents that were fine, whether one probe page is enough for a long document,
+and whether the toll should scale with page count rather than being paid once.
+
+**Cheaper triage** would take the toll off documents that obviously do not need
+it. The service renders every OCR page already, so contrast, ink coverage and
+noise are free to measure — enough to skip the probe on a clean page, or to
+force it on a visibly degraded one before OCR has said anything at all.
 
 Smaller: HTML input, and the page cache clears wholesale at its limit rather
 than evicting LRU (deliberate, and moot once values live in a real store).

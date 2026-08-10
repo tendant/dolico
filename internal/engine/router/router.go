@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"sort"
 	"time"
 
@@ -35,6 +36,18 @@ type Options struct {
 	// vision tier. Tier 3 costs seconds per page, so a wholly unreadable
 	// document must not turn into an unbounded run.
 	VisionMaxPages int
+	// VisionProbe asks the vision tier about one page of every document that
+	// used OCR, even when no page admitted to failing.
+	//
+	// It exists because the threshold above can only catch OCR that knows it
+	// struggled. Measured on the repository's own corpus, the OCR tier misread
+	// more than half the words on a real microfilm scan and reported 0.938
+	// confidence — a page that scores 0.61 and is never escalated. Nothing
+	// computed from that page disagrees with the engine. Another engine does.
+	VisionProbe bool
+	// VisionDisagreement is how far the two tiers must be apart on the probed
+	// page before the OCR tier is distrusted for the whole document.
+	VisionDisagreement float64
 	// Weights tunes the quality scorer.
 	Weights quality.Weights
 	// Logger receives routing decisions. Required.
@@ -62,6 +75,9 @@ func New(reg *engine.Registry, ocr engine.Engine, c *cache.Cache, opts Options) 
 	}
 	if opts.VisionMaxPages <= 0 {
 		opts.VisionMaxPages = 5
+	}
+	if opts.VisionDisagreement <= 0 {
+		opts.VisionDisagreement = quality.DefaultDisagreement
 	}
 	return &Router{registry: reg, ocr: ocr, cache: c, opts: opts}
 }
@@ -258,55 +274,49 @@ func (r *Router) escalateToVision(
 	doc *canonical.Document,
 	log *slog.Logger,
 ) {
-	if r.vision == nil || r.opts.VisionThreshold <= 0 || len(ocrPages) == 0 {
+	if r.vision == nil || len(ocrPages) == 0 {
+		return
+	}
+	if r.opts.VisionThreshold <= 0 && !r.opts.VisionProbe {
 		return
 	}
 
-	type candidate struct {
-		number int
-		score  float64
-	}
-	var candidates []candidate
-	for _, number := range ocrPages {
-		page, ok := byNumber[number]
-		if !ok {
-			continue
-		}
-		// A page that went straight to OCR has not been scored yet — only
-		// natively-extracted pages were scored in step 4 — so score it here
-		// rather than skipping it, which would make the commonest candidate
-		// (a scanned page) unreachable.
-		if page.Quality == nil {
-			q := quality.Score(&page, r.opts.Weights)
-			page.Quality = &q
-			byNumber[number] = page
-		}
-		if page.Quality.Score < r.opts.VisionThreshold {
-			candidates = append(candidates, candidate{number, page.Quality.Score})
-		}
-	}
-	if len(candidates) == 0 {
+	// Rank every OCR page, worst first. Both the threshold and the probe want
+	// the same ordering: a cap should keep the pages that need it most, and
+	// the page most likely to expose a failing engine is the one it already
+	// scored lowest.
+	ranked := r.rankOCRPages(ocrPages, byNumber)
+	if len(ranked) == 0 {
 		return
 	}
 
-	// Worst first, so that a cap keeps the pages that need it most.
-	sort.Slice(candidates, func(i, j int) bool {
-		if candidates[i].score != candidates[j].score {
-			return candidates[i].score < candidates[j].score
+	var below []int
+	for _, c := range ranked {
+		if c.score < r.opts.VisionThreshold {
+			below = append(below, c.number)
 		}
-		return candidates[i].number < candidates[j].number
-	})
-	dropped := 0
-	if len(candidates) > r.opts.VisionMaxPages {
-		dropped = len(candidates) - r.opts.VisionMaxPages
-		candidates = candidates[:r.opts.VisionMaxPages]
 	}
 
-	pages := make([]int, len(candidates))
-	for i, c := range candidates {
-		pages[i] = c.number
+	targets := below
+	probed, probeResult := -1, (*engine.ExtractResult)(nil)
+	if r.opts.VisionProbe {
+		probed, probeResult = r.probeVision(ctx, req, ranked[0].number, byNumber, doc, log)
+		if probeResult != nil {
+			// The probe disagreed: this document's OCR is not to be trusted
+			// anywhere, not just on the pages that admitted trouble.
+			targets = make([]int, 0, len(ranked))
+			for _, c := range ranked {
+				targets = append(targets, c.number)
+			}
+		}
 	}
-	sort.Ints(pages)
+	if len(targets) == 0 {
+		return
+	}
+
+	// Re-rank the targets worst-first before capping, since `targets` may now
+	// be every OCR page rather than only the ones under the threshold.
+	pages, dropped := r.capWorstFirst(targets, ranked)
 
 	log.Info("escalating to vision",
 		"pages", pages,
@@ -319,13 +329,35 @@ func (r *Router) escalateToVision(
 			"cap", r.opts.VisionMaxPages, "dropped", dropped)
 	}
 
-	res, err := r.extract(ctx, r.vision, req, pages, doc)
-	if err != nil {
-		log.Error("vision extraction failed; keeping the OCR results", "pages", pages, "error", err)
-		for _, number := range pages {
-			markPage(byNumber, number, "vision_failed")
+	// The probe already read one page. Asking for it again would pay for the
+	// same inference twice.
+	remaining := make([]int, 0, len(pages))
+	for _, n := range pages {
+		if n != probed || probeResult == nil {
+			remaining = append(remaining, n)
 		}
-		return
+	}
+
+	res := &engine.ExtractResult{}
+	if probeResult != nil {
+		for _, p := range probeResult.Pages {
+			if slices.Contains(pages, p.Number) {
+				res.Pages = append(res.Pages, p)
+			}
+		}
+	}
+	if len(remaining) > 0 {
+		more, err := r.extract(ctx, r.vision, req, remaining, doc)
+		if err != nil {
+			log.Error("vision extraction failed; keeping the OCR results",
+				"pages", remaining, "error", err)
+			for _, number := range remaining {
+				markPage(byNumber, number, "vision_failed")
+			}
+		} else {
+			res.Pages = append(res.Pages, more.Pages...)
+			res.Assets = append(res.Assets, more.Assets...)
+		}
 	}
 
 	returned := make(map[int]bool, len(res.Pages))
@@ -346,6 +378,12 @@ func (r *Router) escalateToVision(
 		q.Escalated = true
 		page.Quality = &q
 		page.Classification.Reasons = append(page.Classification.Reasons, "vision_escalated")
+		if page.Number == probed {
+			// Recorded here rather than on the OCR page, which this replaces:
+			// marking it before the swap would put the reason on a page that
+			// no longer exists. It says which page the decision was made from.
+			page.Classification.Reasons = append(page.Classification.Reasons, "vision_probe")
+		}
 		log.Info("vision replaced an OCR page",
 			"page", page.Number, "was", prev.Quality.Score, "now", q.Score)
 		byNumber[page.Number] = page
@@ -357,6 +395,116 @@ func (r *Router) escalateToVision(
 			markPage(byNumber, number, "vision_failed")
 		}
 	}
+}
+
+// scored is one OCR page and what its OCR result scored.
+type scored struct {
+	number int
+	score  float64
+}
+
+// rankOCRPages scores every page the OCR tier produced and returns them worst
+// first.
+//
+// Pages that went straight to OCR have not been scored at this point — step 4
+// only scores natively-extracted ones — so they are scored here. Skipping them
+// would make the commonest candidate, a scanned page, unreachable.
+func (r *Router) rankOCRPages(ocrPages []int, byNumber map[int]canonical.Page) []scored {
+	ranked := make([]scored, 0, len(ocrPages))
+	for _, number := range ocrPages {
+		page, ok := byNumber[number]
+		if !ok {
+			continue
+		}
+		if page.Quality == nil {
+			q := quality.Score(&page, r.opts.Weights)
+			page.Quality = &q
+			byNumber[number] = page
+		}
+		ranked = append(ranked, scored{number, page.Quality.Score})
+	}
+	sort.Slice(ranked, func(i, j int) bool {
+		if ranked[i].score != ranked[j].score {
+			return ranked[i].score < ranked[j].score
+		}
+		return ranked[i].number < ranked[j].number
+	})
+	return ranked
+}
+
+// capWorstFirst trims a target set to VisionMaxPages, keeping the worst
+// scorers, and returns the kept pages in page order along with how many were
+// dropped.
+func (r *Router) capWorstFirst(targets []int, ranked []scored) (pages []int, dropped int) {
+	want := make(map[int]bool, len(targets))
+	for _, n := range targets {
+		want[n] = true
+	}
+	for _, c := range ranked {
+		if !want[c.number] {
+			continue
+		}
+		if len(pages) >= r.opts.VisionMaxPages {
+			dropped++
+			continue
+		}
+		pages = append(pages, c.number)
+	}
+	sort.Ints(pages)
+	return pages, dropped
+}
+
+// probeVision reads one page with the vision tier and reports whether the two
+// tiers are telling the same story about this document.
+//
+// It returns the probe's result only when they disagree. That is deliberate: a
+// probe that agrees is discarded rather than applied, so a document whose OCR
+// was fine keeps one engine throughout instead of having a single arbitrary
+// page swapped for another engine's rendering of the same words.
+//
+// A probe failure is not a page failure. The page was never a target — it was
+// a question — so nothing is marked and the caller carries on with whatever
+// the threshold selected.
+func (r *Router) probeVision(
+	ctx context.Context,
+	req Request,
+	number int,
+	byNumber map[int]canonical.Page,
+	doc *canonical.Document,
+	log *slog.Logger,
+) (int, *engine.ExtractResult) {
+	before, ok := byNumber[number]
+	if !ok {
+		return -1, nil
+	}
+
+	res, err := r.extract(ctx, r.vision, req, []int{number}, doc)
+	if err != nil {
+		log.Warn("vision probe failed; falling back to the quality threshold alone",
+			"page", number, "error", err)
+		return -1, nil
+	}
+	var after *canonical.Page
+	for i := range res.Pages {
+		if res.Pages[i].Number == number {
+			after = &res.Pages[i]
+		}
+	}
+	if after == nil || len(after.Blocks) == 0 {
+		log.Warn("vision probe returned nothing; falling back to the quality threshold alone",
+			"page", number)
+		return -1, nil
+	}
+
+	d := quality.Disagreement(quality.PlainText(&before), quality.PlainText(after))
+	if d < r.opts.VisionDisagreement {
+		log.Info("vision probe agrees with OCR; keeping the OCR results",
+			"page", number, "disagreement", d, "threshold", r.opts.VisionDisagreement)
+		return number, nil
+	}
+	log.Info("vision probe disagrees with OCR; distrusting it for this document",
+		"page", number, "disagreement", d, "threshold", r.opts.VisionDisagreement)
+	return number, res
 }
 
 // markPage appends a reason to a page without disturbing anything else on it.
