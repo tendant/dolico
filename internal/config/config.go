@@ -45,8 +45,11 @@ type Config struct {
 	// is almost always right: more requests than workers only queue on the far
 	// side while paying to upload the document again.
 	OCRConcurrency int
-	// VisionEnabled turns on the third tier. Off by default: it costs seconds
-	// and gigabytes per page, and only helps pages the OCR tiers already lost.
+	// VisionEnabled turns on the third tier. Off by default because it needs
+	// several gigabytes of model weights the other tiers do not, not because
+	// it is slow -- measured warm it is about as fast as the OCR tier, and it
+	// reads better. It stays a fallback for pipeline reasons rather than model
+	// ones; see docs/vision-tier-design.md.
 	VisionEnabled bool
 	// VisionThreshold is the page quality below which an OCR result is
 	// re-read by the vision tier. Lower than OCRThreshold on purpose.

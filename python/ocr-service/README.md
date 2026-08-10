@@ -15,13 +15,22 @@ Python installed.
 | A scanned table | 18 loose fragments | a 5×3 grid | a 5×3 grid |
 | Dependencies | base install | `+ paddlex[ocr]` (~150MB) | `+ mineru[core]` (torch, ~2.5GB of weights) |
 | Selected by | the router, per page | the router, per page | the **router's escalation**, per page, after Tier 1/2 produced a bad read |
-| Cost | ~2.5s/page | ~2.8s/page | seconds to a minute per page |
+| Cost | ~2.5s/page | ~3-8s/page | ~2-9s/page warm, plus ~6s of warm-up on the first call in a process |
 
 Tiers 1 and 2 are alternatives: one of them serves every OCR request, and which
 one depends only on what is installed. Tier 3 is not an alternative — it is a
 second chance for individual pages the chosen OCR tier scored badly on, and it
 is off unless the API server is started with `DOLICO_VISION_ENABLED=1`. See
 `docs/vision-tier-design.md` for why it exists and when it fires.
+
+Tier 3 reads *better* than Tier 2 on every page of the benchmark corpus — mean
+CER 0.011 against 0.234 — and warm it is not slower. It stays a fallback anyway,
+for reasons that are about the pipeline rather than the model: it reports no
+per-block confidence, so promoting it would delete the only signal that can
+catch a bad read; it would leave nothing to escalate *to*; and it returns
+columns of plain text as tables, which is structure the document does not have.
+That argument is made properly in the design doc under *Should MinerU be
+Tier 2?*.
 
 Scored by `make bench-ocr` over the fixture corpus:
 

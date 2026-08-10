@@ -1,6 +1,9 @@
 # Vision Tier (Tier 3) — Design
 
-Status: **proposed, not implemented.** Engine chosen: **MinerU2.5, self-hosted.**
+Status: **implemented and measured.** Engine: **MinerU2.5, self-hosted.**
+See *Implementation status* and *What the tier is worth, measured* below; the
+sections before them are the original design, kept as written except where a
+measurement contradicted them, which is noted where it happened.
 
 The design document's third OCR tier: a vision model that reads pages the OCR
 tiers cannot. Everything below was measured on this machine rather than
@@ -214,11 +217,10 @@ hold against the `pipeline` backend, which is PP-OCR based — which is why this
 design specifies `hybrid-engine` and treats that as load-bearing rather than a
 default worth accepting silently.
 
-**2. MinerU may be a better Tier 2 than PP-StructureV3.** On the one fixture we
-have, it is. That is a real finding and it arrived after the tier decision, so
-it is recorded rather than acted on. The benchmark harness could settle it
-properly — that is a separate piece of work, and the original design document
-listed "MinerU strategy" as its own V2 item, distinct from the vision fallback.
+**2. MinerU may be a better Tier 2 than PP-StructureV3.** Settled: it reads
+better than PP-StructureV3 on every page of this corpus, and warm it is not
+slower. See the section below — the conclusion is not the one this concern
+anticipated, because "reads better" turned out not to settle "should be Tier 2".
 
 **3. The license is not plain Apache.** It is the "MinerU Open Source License,
 based on Apache 2.0 with additional conditions." Worth reading those conditions
@@ -283,3 +285,61 @@ Closing that would take a second opinion rather than a better signal: a cheap
 disagreement check between two engines on the same page, or a lexicon, which
 this pipeline has deliberately avoided because it is language-specific. Both
 are larger than a threshold change, and neither is in this design.
+
+## Should MinerU be Tier 2?
+
+Recorded concern #2, settled by measurement. Every OCR page in the corpus was
+posted to the same service twice, at the default tier and at `tier=vision`, and
+scored with the benchmark's own scoring code. Second run, both models warm:
+
+| page | `pp-structurev3` CER / WER | `mineru` CER / WER |
+| --- | --- | --- |
+| `scanned.pdf` | 0.014 / 0.182 | 0.014 / 0.182 |
+| `scanned-table.pdf` | 0.013 / 0.125 | **0.000 / 0.000** |
+| `mixed.pdf` p2 | 0.050 / 0.545 | **0.017 / 0.182** |
+| `faded.pdf` | 1.000 / 1.000 | **0.019 / 0.087** |
+| `radio-1922.pdf` | 0.091 / 0.540 | **0.005 / 0.016** |
+| **mean** | 0.234 / 0.478 | **0.011 / 0.093** |
+| table cell accuracy | 0.933 | **1.000** |
+| total wall time | 24.3s | **23.0s** |
+| peak service RSS | 6.3GB | 7.6GB on the first call, then 6.3GB |
+
+MinerU is better or equal on every page, twenty times better on mean CER, and
+it recovers the one table perfectly where PP-StructureV3 drops a thousands
+separator.
+
+**It is also not slower**, which contradicts what the rest of this document
+says. The "seconds to a minute per page" figure came from cold calls: the first
+vision request in a process pays about 6s of warm-up, and after that MinerU was
+faster than PP-StructureV3 on four of five pages. On CPU, on Apple Silicon. The
+cost argument for keeping it in reserve is weaker than it looked.
+
+### And yet: no.
+
+Not on this evidence, because "reads better" is not the same question as
+"should be the default tier", and the two things that make it a good Tier 3 are
+exactly what disqualify it as Tier 2:
+
+- **It reports no confidence.** Promoting MinerU would delete the only signal
+  that can catch a bad read — the measured-confidence path the scorer was just
+  rebuilt around. Every OCR page would fall back to the additive formula, whose
+  floor is 0.55 for any page with text, and nothing could ever escalate again.
+- **There would be nothing to escalate *to*.** The tier structure exists to give
+  a failed page a second chance from a different kind of engine. Spend the best
+  engine first and a failure is final.
+- **It invents tables.** `faded.pdf` and `radio-1922.pdf` are columns of plain
+  text, and MinerU returns both as `table` blocks. The CER numbers above hide
+  this, because the text scorer walks into table cells by design. As Tier 3 on a
+  page that was otherwise lost, a spurious grid is a small price. As the default
+  for every scanned page, it puts structure into the canonical model that is not
+  in the document — which is the thing this pipeline refuses to do elsewhere.
+
+So the finding is real and the tiering stays. What it actually argues for is
+raising how often Tier 3 runs, not promoting it: on this corpus it would have
+improved four pages out of five and cost nothing in wall time. That is the same
+conclusion the escalation-trigger section reaches from the other direction, and
+it is one more reason the next piece of work is the trigger rather than the
+tier.
+
+Sample size: five pages, four of them synthetic, one machine, CPU only. The
+direction is unambiguous and the margin is large, but this is not a corpus.

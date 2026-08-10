@@ -401,13 +401,15 @@ knows where bytes live. It also unlocks partial reprocessing after an engine
 upgrade: the page-level cache key already exists, it just has nowhere durable
 to look.
 
-**A real corpus** is what the benchmark now needs. The harness exists and has
-already earned its keep — it showed the server OCR models recover a scanned
-table perfectly where the mobile default drops a cell, which contradicted an
-earlier claim that the two were equivalent. But it is scoring seven synthetic
-documents. Point `--corpus` at real scans and the model choice, the escalation
-threshold, and the four weights in `internal/engine/quality` become measurable
-rather than argued.
+**A real corpus** is what the benchmark now needs. The harness has earned its
+keep twice: it showed the server OCR models recover a scanned table perfectly
+where the mobile default drops a cell, and it settled whether MinerU should be
+the default OCR tier (it reads twenty times better and is not slower — and it
+stays Tier 3 anyway, for reasons in
+[the design doc](docs/vision-tier-design.md#should-mineru-be-tier-2)). But it
+is scoring eight generated documents and one real scan. Point `--corpus` at a
+real collection and the model choice, the escalation threshold, and the four
+weights in `internal/engine/quality` become measurable rather than argued.
 
 **A second opinion** is the next real gap, and the corpus now shows why. The
 escalation catches a page OCR gave up on; it cannot catch a page OCR read
