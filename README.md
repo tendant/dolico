@@ -82,7 +82,7 @@ With the vision tier as well — heavier, and only worth starting if you have
 pages OCR loses:
 
 ```bash
-make ocr-vision  # the same service, plus MinerU (torch; ~2.5GB of weights)
+make ocr-vision  # the same service, plus MinerU (torch; ~3.2GB of weights, ~7GB RAM)
 make run-vision  # the API server, with escalation to Tier 3 enabled
 ```
 

@@ -59,7 +59,7 @@ The hybrid backend is the only engine tested that gets the whole page right.
 | | |
 | --- | --- |
 | Install | `uv pip install "mineru[core]"` — 106 packages, ~1.1GB venv |
-| Model cache | ~8.3GB on first run, one time |
+| Model cache | ~3.2GB on first run, one time — 2.2GB for the VLM, 1.0GB for the pipeline backend's models. (An earlier draft said 8.3GB; that was the whole shared Hugging Face cache, most of it PaddleOCR's.) |
 | Warm latency | 14s (`pipeline`) / 16s (`hybrid-engine`) per page via CLI |
 | Actual inference | ~7s for the hybrid VLM; the remaining ~9s is CLI/server startup |
 | Apple Silicon | Works — both backends ran, no CUDA |
@@ -101,9 +101,17 @@ repo already uses for its optional tiers:
   `hybrid-http-client` backend against it.
 
 The remote mode matters more than it looks. The OCR service already measures
-~3GB per worker, and we found four workers costs 12.3GB; adding an ~8GB model
-into that process multiplies badly. Keeping MinerU in its own process, on its
-own box or GPU, is the sane production shape.
+~3GB per worker, and four workers costs 12.3GB; MinerU adds about 3GB of
+resident memory on top of that, per worker, because each worker process loads
+its own copy. Keeping MinerU in its own process, on its own box or GPU, is the
+sane production shape.
+
+*Measured later, and more sharply than this section assumed:* 1.8GB idle, 3.4GB
+once the OCR models have run, 6.3GB steady with both model sets resident, 7.6GB
+peak during the first vision call. The earlier drafts of this document said
+"an ~8GB model", which was the size of the whole shared Hugging Face cache on
+disk — MinerU's own weights are 2.2GB for the VLM plus 1.0GB for the pipeline
+backend's, and disk was never the constraint. Resident memory is.
 
 ## Output mapping
 

@@ -13,7 +13,7 @@ Python installed.
 | --- | --- | --- | --- |
 | Detects | text lines | layout regions: headings, paragraphs, figures, **tables** | the whole page, by a 1.2B vision model |
 | A scanned table | 18 loose fragments | a 5×3 grid | a 5×3 grid |
-| Dependencies | base install | `+ paddlex[ocr]` (~150MB) | `+ mineru[core]` (torch, ~2.5GB of weights) |
+| Dependencies | base install | `+ paddlex[ocr]` (~150MB) | `+ mineru[core]` (torch, ~3.2GB of weights) |
 | Selected by | the router, per page | the router, per page | the **router's escalation**, per page, after Tier 1/2 produced a bad read |
 | Cost | ~2.5s/page | ~3-8s/page | ~2-9s/page warm, plus ~6s of warm-up on the first call in a process |
 
@@ -186,9 +186,10 @@ only backend measured here that reads `scanned-table.pdf` completely correctly;
 uses, so it tends to fail the same pages Tier 3 was called in to rescue.
 
 Setting `DOLICO_MINERU_URL` switches to the matching HTTP-client backend
-(`hybrid-engine` → `hybrid-http-client`) and keeps ~8GB of weights out of a
-service already measured at ~3GB per worker. `pipeline` has no remote form and
-is rejected when a URL is set.
+(`hybrid-engine` → `hybrid-http-client`) so that N OCR workers share one copy of
+the model instead of each loading its own — worth about 3GB of resident memory
+per worker, measured. `pipeline` has no remote form and is rejected when a URL
+is set.
 
 ### On table orientation classification
 
@@ -255,7 +256,7 @@ sync. It splits a document's OCR pages into at most that many contiguous chunks
 and sends them concurrently — chunks rather than one request per page, because
 each request re-uploads the document.
 
-Measured end to end on a 6-page scan:
+Measured end to end on a 6-page scan, OCR tiers only:
 
 | Workers | Wall time | Memory |
 | --- | --- | --- |
@@ -266,10 +267,26 @@ It falls short of 4× only because six pages over four shards is [2,2,1,1], so
 the critical path is a two-page chunk; the ratio approaches the worker count as
 documents get longer.
 
-**Budget roughly 3GB per worker.** That is the real constraint: the models are
-about 1.5GB and the allocator arenas grow to ~3GB after the first inference,
-then plateau. `OCR_WORKERS` defaults to 1 for that reason — raising it trades
-memory for latency deliberately — and startup costs one model load per worker.
+**Budget roughly 3GB per worker without the vision tier, and 7GB with it.**
+Memory is the real constraint, and it doubled when Tier 3 stopped being rare.
+
+For the OCR tiers alone the models are about 1.5GB and the allocator arenas
+grow to ~3GB after the first inference, then plateau. Install the vision extra
+and MinerU loads into the same process: measured **1.8GB idle, 6.3GB steady
+with both model sets resident, 7.6GB peak** during the first vision call.
+
+That used to be a rare cost, paid only on pages the OCR tiers lost. It is not
+any more — the router's disagreement probe reads one page of *every* document
+with a scanned page, so on a service that sees scans at all, MinerU is resident
+and hot. Multiply by `OCR_WORKERS`, since each worker process loads its own
+copy: four workers with vision is roughly 28GB, not 12GB.
+
+`OCR_WORKERS` defaults to 1 for this reason — raising it trades memory for
+latency deliberately — and startup costs one model load per worker. The way out
+is `DOLICO_MINERU_URL`, which runs MinerU as its own process so N OCR workers
+share one copy of the weights instead of each holding their own. That path is
+written and documented but has not been tested against a real MinerU server, so
+treat it as a design rather than a recommendation until it has been.
 
 ## Tests
 

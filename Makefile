@@ -158,11 +158,15 @@ run-ocr: build
 #
 # The same service on the same port, with MinerU installed alongside PaddleOCR.
 # It is a separate target because the extra is heavy: the install pulls torch,
-# and the first request downloads the MinerU2.5 weights (~2.5GB) into the
-# Hugging Face cache. Budget roughly 8GB of RAM for one vision worker.
+# and the first request downloads ~3.2GB of MinerU weights into the Hugging
+# Face cache. Budget roughly 7GB of RAM per worker, measured -- 6.3GB steady
+# with both model sets resident and 7.6GB peak on the first vision call,
+# against ~3GB for the OCR tiers alone.
 #
 # Nothing else changes for the OCR tiers -- `ocr-vision` is a superset of
-# `ocr`, and the API server only escalates to Tier 3 when asked to.
+# `ocr`. The API server still only escalates to Tier 3 when asked to, but with
+# the disagreement probe on that is every document with a scanned page, so
+# budget for MinerU being resident rather than occasional.
 # ---------------------------------------------------------------------------
 
 ocr-vision:
