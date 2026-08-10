@@ -15,6 +15,37 @@ start until the OCR service is healthy, so `docker compose up` will sit there
 for a few minutes the first time and start quickly on every restart after,
 because the models live in a volume.
 
+## The OCR image is amd64 only
+
+PaddlePaddle publishes no Linux aarch64 wheels — PyPI has `manylinux1_x86_64`,
+`macosx_11_0_arm64` and `win_amd64`, and that is the whole list. The compose
+file therefore pins the OCR service to `linux/amd64`:
+
+```yaml
+platform: ${DOLICO_OCR_PLATFORM:-linux/amd64}
+```
+
+On an amd64 server this costs nothing. On an Apple Silicon machine it runs
+under emulation, and since Paddle is CPU-bound numeric code, **expect it to be
+several times slower than the `make ocr` you develop against** — that path uses
+the native macOS arm64 wheel. Measured here: ~7s for a page that takes ~2.5s
+natively. Emulated, it works; it is not a performance measurement.
+
+**On Apple Silicon you also have to turn oneDNN off:**
+
+```bash
+DOLICO_PADDLE_MKLDNN=False docker compose -f deploy/docker-compose.yml up -d
+```
+
+Paddle's oneDNN backend is x86 code. Emulated, inference dies inside the model
+runner with `ConvertPirAttribute2RuntimeAttribute not support`, which reaches
+the API as a bare `500` from `/v1/extract` and says nothing about the cause. The
+API handles it correctly — the page comes back with `ocr_failed` in its reasons
+and the error in `trace.engines` — but every scanned page is empty. Leave the
+flag alone on amd64, where oneDNN works and is the faster path.
+
+The API image has no such constraint and builds natively for the host.
+
 ## This is not safe to expose. What your gateway must do
 
 **dolico has no authentication, no authorization and no rate limiting.** The
@@ -76,6 +107,17 @@ This matters more than it usually would, because there is no database.
 
 The practical consequence: clients should treat a 404 from `/v1/jobs/{id}` as
 "re-upload", and re-uploading is cheap because it is idempotent by content hash.
+
+**A failed extraction is remembered as a finished one.** This bit during
+deployment testing and is worth knowing before it bites in production. If OCR
+is down or broken, the document still completes — pages come back empty with
+`ocr_failed` in their reasons, which is the correct behaviour for one request.
+But that document is then written to the store, and because the document-level
+short-circuit only asks "have I processed these bytes under this schema and
+pipeline", **re-uploading the same file returns the empty result forever**
+rather than retrying. Recovering means deleting that document from the data
+volume, or bumping `canonical.PipelineVersion`. Worth fixing properly; until
+then, do not let a broken OCR tier stay up.
 
 ## The blob store grows forever
 

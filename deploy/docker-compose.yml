@@ -14,11 +14,25 @@ services:
     build:
       context: ..
       dockerfile: deploy/Dockerfile.ocr
+    # PaddlePaddle publishes no Linux aarch64 wheels -- only manylinux x86_64,
+    # macOS arm64 and Windows. So this image is amd64 whatever the host is.
+    # On an Apple Silicon machine that means emulation, and Paddle is CPU-bound
+    # numeric code, so expect it to be several times slower than the native
+    # `make ocr` you have been developing against. A real amd64 server runs it
+    # natively and the setting costs nothing there.
+    platform: ${DOLICO_OCR_PLATFORM:-linux/amd64}
     environment:
       # One inference uses about one core and does not thread, so throughput
       # comes from processes. Each costs ~3GB once warm -- keep this and
       # mem_limit in step.
       DOLICO_OCR_WORKERS: ${DOLICO_OCR_WORKERS:-2}
+      # Paddle's oneDNN backend is x86 code. Emulated on Apple Silicon it dies
+      # inside inference with "ConvertPirAttribute2RuntimeAttribute not
+      # support", which arrives as a 500 from /v1/extract and tells you nothing
+      # about the cause. Set DOLICO_PADDLE_MKLDNN=False to develop against this
+      # stack on an arm64 machine; leave it alone on an amd64 server, where
+      # oneDNN works and is the faster path.
+      PADDLE_PDX_ENABLE_MKLDNN_BYDEFAULT: ${DOLICO_PADDLE_MKLDNN:-True}
     volumes:
       # Models are downloaded on first start. Without this volume every
       # container restart re-downloads a few hundred megabytes and spends

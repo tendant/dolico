@@ -9,6 +9,12 @@
 # below, which pulls torch and roughly triples the image, plus ~3.2GB of model
 # weights on first run and ~7GB of memory per worker instead of ~3GB. See
 # deploy/README.md before turning it on.
+#
+# **This image is amd64 only.** PaddlePaddle ships no Linux aarch64 wheels --
+# checked against PyPI, which has manylinux1_x86_64, macosx_11_0_arm64 and
+# win_amd64 and nothing else. The compose file pins the platform accordingly;
+# building this by hand on an arm64 host needs --platform linux/amd64 or it
+# fails at dependency resolution.
 FROM python:3.12-slim
 
 # Pin this to a released uv version once you have chosen one; `latest` is used
@@ -31,7 +37,15 @@ RUN uv sync --frozen --extra structure --no-install-project
 
 COPY python/ocr-service/dolico_ocr ./dolico_ocr
 RUN uv sync --frozen --extra structure \
-    && chown -R dolico:dolico /app
+    && chown -R dolico:dolico /app \
+    # Create the model cache in the image, owned by the user that will write to
+    # it. Docker initializes an empty named volume from whatever is at the
+    # mount point, ownership included -- so without this the volume arrives
+    # root-owned, the non-root process cannot download models into it, and the
+    # failure surfaces several imports later as paddlex reporting "PDX has
+    # already been initialized", which says nothing about permissions.
+    && mkdir -p /home/dolico/.paddlex \
+    && chown dolico:dolico /home/dolico/.paddlex
 
 USER dolico
 ENV HOME=/home/dolico \
