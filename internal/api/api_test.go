@@ -50,7 +50,23 @@ func repoRoot(t *testing.T) string {
 	return filepath.Clean(filepath.Join(filepath.Dir(file), "..", ".."))
 }
 
-func newHarness(t *testing.T) *harness {
+// stubVision stands in for the escalation tier. Only its identity matters
+// here: the endpoint reports what it is, it does not call it.
+type stubVision struct{ name, version string }
+
+func (s stubVision) Name() string    { return s.name }
+func (s stubVision) Version() string { return s.version }
+func (s stubVision) Inspect(context.Context, canonical.Source, string) (*engine.Inspection, error) {
+	return nil, engine.ErrUnsupported
+}
+func (s stubVision) Supports(*engine.Inspection) engine.SupportScore { return engine.SupportNone }
+func (s stubVision) Extract(context.Context, *engine.ExtractRequest) (*engine.ExtractResult, error) {
+	return nil, engine.ErrUnsupported
+}
+
+func newHarness(t *testing.T) *harness { return newHarnessWith(t, nil) }
+
+func newHarnessWith(t *testing.T, vision engine.Engine) *harness {
 	t.Helper()
 	root := repoRoot(t)
 	bin := filepath.Join(root, "rust/dolico-rs/target/release/dolico-rs")
@@ -133,8 +149,9 @@ func newHarness(t *testing.T) *harness {
 	}, log)
 
 	srv := httptest.NewServer(api.New(api.Deps{
-		Store: store, Jobs: jobStore, Registry: registry, Cache: pageCache,
-		Log: log, MaxUploadBytes: 64 << 20, ShimPath: bin, WaitTimeout: 60 * time.Second,
+		Store: store, Jobs: jobStore, Registry: registry, Vision: vision,
+		Cache: pageCache,
+		Log:   log, MaxUploadBytes: 64 << 20, ShimPath: bin, WaitTimeout: 60 * time.Second,
 	}).Routes())
 
 	t.Cleanup(func() {
@@ -573,6 +590,40 @@ func TestEnginesEndpointReportsVersions(t *testing.T) {
 		if names[want] == "" {
 			t.Errorf("engine %s missing or unversioned: %v", want, names)
 		}
+	}
+}
+
+// The vision tier is not in the registry — nothing selects it, the router
+// calls it directly — but it does read documents, and MinerU's license
+// requires a service built on it to say so. An engines endpoint that omits an
+// engine that produced pages is wrong twice over.
+func TestEnginesEndpointDisclosesTheVisionTier(t *testing.T) {
+	h := newHarnessWith(t, stubVision{name: "mineru", version: "2.5.4"})
+	_, _, body := h.get(t, "/v1/engines")
+
+	var payload struct {
+		Engines []struct{ Name, Version string }
+	}
+	if err := json.Unmarshal(body, &payload); err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range payload.Engines {
+		if e.Name == "mineru" {
+			if e.Version != "2.5.4" {
+				t.Errorf("version = %q, want 2.5.4", e.Version)
+			}
+			return
+		}
+	}
+	t.Errorf("the vision tier is not listed: %s", body)
+}
+
+// ...and a two-tier deployment must not advertise a tier it does not have.
+func TestEnginesEndpointOmitsAnAbsentVisionTier(t *testing.T) {
+	h := newHarness(t)
+	_, _, body := h.get(t, "/v1/engines")
+	if strings.Contains(string(body), "mineru") {
+		t.Errorf("a server with no vision tier advertised one: %s", body)
 	}
 }
 

@@ -29,9 +29,14 @@ import (
 
 // Deps is what the API needs from the rest of the service.
 type Deps struct {
-	Store          *blob.Store
-	Jobs           *jobs.Store
-	Registry       *engine.Registry
+	Store    *blob.Store
+	Jobs     *jobs.Store
+	Registry *engine.Registry
+	// Vision is the escalation tier, which is deliberately not in the
+	// registry — nothing selects it, the router calls it directly. It is
+	// carried here anyway so that /v1/engines can report every engine that
+	// may have touched a document rather than only the selectable ones.
+	Vision         engine.Engine
 	Cache          *cache.Cache
 	Log            *slog.Logger
 	MaxUploadBytes int64
@@ -282,6 +287,15 @@ func (s *Server) listEngines(w http.ResponseWriter, r *http.Request) {
 	out := make([]engineInfo, 0)
 	for _, e := range s.deps.Registry.All() {
 		out = append(out, engineInfo{Name: e.Name(), Version: e.Version()})
+	}
+	// The vision tier is not in the registry, but it does produce pages, and
+	// an endpoint that claims to list this service's engines while omitting
+	// one that reads documents is both wrong and — because MinerU's license
+	// requires an online service to say it uses MinerU — a compliance gap.
+	if s.deps.Vision != nil {
+		out = append(out, engineInfo{
+			Name: s.deps.Vision.Name(), Version: s.deps.Vision.Version(),
+		})
 	}
 	hits, misses, size := s.deps.Cache.Stats()
 	s.writeJSON(w, http.StatusOK, map[string]any{

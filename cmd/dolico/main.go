@@ -73,6 +73,7 @@ func run() error {
 	}
 	registry := engine.NewRegistry(native, pdf, ocr)
 	pageCache := cache.New(50_000)
+	vision := visionEngine(cfg, ocr, log)
 
 	rt := router.New(registry, ocr, pageCache, router.Options{
 		OCRThreshold:       cfg.OCRThreshold,
@@ -82,7 +83,7 @@ func run() error {
 		VisionDisagreement: cfg.VisionDisagreement,
 		Weights:            quality.DefaultWeights,
 		Logger:             log,
-	}).WithVision(visionEngine(cfg, ocr, log))
+	}).WithVision(vision)
 
 	jobStore := jobs.NewStore(cfg.Workers, cfg.Workers*16, processDocument(store, rt, log), log)
 
@@ -92,6 +93,7 @@ func run() error {
 			Store:          store,
 			Jobs:           jobStore,
 			Registry:       registry,
+			Vision:         vision,
 			Cache:          pageCache,
 			Log:            log,
 			MaxUploadBytes: cfg.MaxUploadBytes,

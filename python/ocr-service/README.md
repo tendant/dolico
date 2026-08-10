@@ -119,7 +119,7 @@ Markdown view separately promotes the first row into the header position,
 because GFM cannot express a headerless table — that is a rendering
 concession, and the JSON stays exact.
 
-**Tier 3** reads the page image directly with MinerU2.5, a 1.2B vision model,
+**Tier 3** reads the page image directly with MinerU2.5-Pro-2605-1.2B, a 1.2B vision model,
 and returns the same block types — except that a table with one column comes
 back as paragraphs. MinerU labels narrow columns of ordinary text as tables:
 the faded receipt arrives as 8×1 and the 1922 newspaper column as 9×1, while

@@ -1,6 +1,6 @@
 # Vision Tier (Tier 3) — Design
 
-Status: **implemented and measured.** Engine: **MinerU2.5, self-hosted.**
+Status: **implemented and measured.** Engine: **MinerU (2.5-Pro-2605-1.2B), self-hosted.**
 See *Implementation status* and *What the tier is worth, measured* below; the
 sections before them are the original design, kept as written except where a
 measurement contradicted them, which is noted where it happened.
@@ -222,9 +222,20 @@ better than PP-StructureV3 on every page of this corpus, and warm it is not
 slower. See the section below — the conclusion is not the one this concern
 anticipated, because "reads better" turned out not to settle "should be Tier 2".
 
-**3. The license is not plain Apache.** It is the "MinerU Open Source License,
-based on Apache 2.0 with additional conditions." Worth reading those conditions
-before this ships.
+**3. The license is not plain Apache.** Read, and benign. Apache-2.0 plus a
+commercial threshold nobody here is near (100M MAU or USD 20M monthly revenue),
+an attribution obligation for online services, and automatic termination for
+breaching either. The model weights are separately declared plain Apache-2.0.
+
+The attribution term was not being met: the vision tier is deliberately absent
+from the engine registry, so `/v1/engines` omitted the one engine that had
+actually read the page. Fixed — the endpoint reports it now. Details and the
+full dependency sweep are in the README under *Licensing of what this depends
+on*.
+
+Also corrected while checking: the model this runs is
+**MinerU2.5-Pro-2605-1.2B**, not the "MinerU2.5" named elsewhere in this
+document.
 
 ## What the tier is worth, measured
 

@@ -408,6 +408,48 @@ Regenerating the PDFs produces no diff unless something actually changed —
 and PPTX fixtures still differ on every run, because their libraries write
 times into the package.
 
+## Licensing of what this depends on
+
+Checked against the installed versions rather than the project pages, because
+the wheel is what actually runs here.
+
+| | License | |
+| --- | --- | --- |
+| `anydoc`, `pdf-inspector` (Rust) | MIT | |
+| PaddleOCR / PaddleX (Tier 1–2) | Apache-2.0 | |
+| **MinerU 3.4.4** (Tier 3 code) | **Apache-2.0 + additional terms** | see below |
+| MinerU2.5-Pro-2605-1.2B (Tier 3 weights) | Apache-2.0 | plain, no additional terms |
+| everything else in the Python venv | MIT / BSD / Apache / MPL / PSF | 4 LGPL, no GPL, AGPL or SSPL |
+
+MinerU is the only dependency that is not a stock permissive license. It
+declares `LicenseRef-MinerU-Open-Source-License`: Apache-2.0 plus three terms,
+which are short enough to state in full rather than paraphrase away.
+
+1. **Commercial thresholds.** Commercial use needs no separate license until
+   you and your affiliates, consolidated, exceed **100M monthly active users**
+   *or* **USD 20M monthly revenue**. Past either, you must obtain a commercial
+   license from the MinerU team before continuing.
+2. **Attribution for online services.** If you provide an online service to
+   third parties based on MinerU, you must indicate clearly and prominently —
+   in the service interface or in public documentation — that MinerU is used.
+3. **Automatic termination** if you breach either, with no notice required.
+
+Nothing here restricts field of use, requires reciprocal licensing, or blocks
+commercial deployment at any plausible size. It is a "get big, then call us"
+license.
+
+Term 2 is the one that applies to this repository, and it did not hold when it
+was checked: the vision tier is not in the engine registry, so `/v1/engines`
+listed every engine *except* the one that had produced the page you were
+looking at. It is listed now. If you deploy this as a service, that endpoint
+and this README are what carry the attribution — keep them.
+
+Two things this does not settle. The repository has **no `LICENSE` file of its
+own**, which is a decision nobody has made yet. And the four LGPL packages
+(`cssutils`, `encutils`, `crc32c`, `python-bidi`) are fine as unmodified
+dynamically-imported libraries, but would need a look before anyone vendors or
+patches them.
+
 ## Next
 
 **Persistence** is now the largest gap. Postgres for jobs and page metadata,
