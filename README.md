@@ -444,11 +444,14 @@ listed every engine *except* the one that had produced the page you were
 looking at. It is listed now. If you deploy this as a service, that endpoint
 and this README are what carry the attribution — keep them.
 
-Two things this does not settle. The repository has **no `LICENSE` file of its
-own**, which is a decision nobody has made yet. And the four LGPL packages
-(`cssutils`, `encutils`, `crc32c`, `python-bidi`) are fine as unmodified
-dynamically-imported libraries, but would need a look before anyone vendors or
-patches them.
+**This repository is MIT** — see [`LICENSE`](LICENSE). That covers the code
+here and nothing else: MinerU is an optional extra the operator installs, not
+something this repository vendors or relicenses, so its additional terms attach
+to whoever runs the service rather than to this code.
+
+One loose end: the four LGPL packages (`cssutils`, `encutils`, `crc32c`,
+`python-bidi`) are fine as unmodified, dynamically-imported libraries, but would
+need a look before anyone vendors or patches them.
 
 ## Next
 
