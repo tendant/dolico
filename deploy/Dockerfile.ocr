@@ -1,0 +1,51 @@
+# The OCR tier: PaddleOCR (Tier 1) and PP-StructureV3 (Tier 2).
+#
+# Deliberately not multi-stage. Paddle ships compiled shared objects with
+# baked-in paths, and copying a virtualenv containing them between stages is a
+# reliable source of subtle breakage. The image is larger for it; that is the
+# trade being made on purpose.
+#
+# The vision tier is not installed here. Adding it means `--extra vision`
+# below, which pulls torch and roughly triples the image, plus ~3.2GB of model
+# weights on first run and ~7GB of memory per worker instead of ~3GB. See
+# deploy/README.md before turning it on.
+FROM python:3.12-slim
+
+# Pin this to a released uv version once you have chosen one; `latest` is used
+# here only because the tag list could not be checked when this was written.
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /usr/local/bin/
+
+# libgl1 and libglib2.0-0 are opencv's, libgomp1 is Paddle's. Without them the
+# import fails at startup rather than at first request, which is at least loud.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        libgl1 libglib2.0-0 libgomp1 curl \
+    && rm -rf /var/lib/apt/lists/* \
+    && useradd --system --create-home --uid 10002 dolico
+
+WORKDIR /app
+
+# Dependencies first, so that editing the service does not reinstall Paddle.
+COPY python/ocr-service/pyproject.toml python/ocr-service/uv.lock ./
+RUN uv sync --frozen --extra structure --no-install-project
+
+COPY python/ocr-service/dolico_ocr ./dolico_ocr
+RUN uv sync --frozen --extra structure \
+    && chown -R dolico:dolico /app
+
+USER dolico
+ENV HOME=/home/dolico \
+    PATH=/app/.venv/bin:$PATH \
+    DOLICO_OCR_WORKERS=2
+EXPOSE 8181
+
+# Models download to ~/.paddlex on first start and load per worker, so a cold
+# container with an empty model volume is not ready for a while. start_period
+# covers that; the compose file gives it longer still.
+HEALTHCHECK --interval=15s --timeout=5s --start-period=180s --retries=5 \
+    CMD curl -fsS http://127.0.0.1:8181/healthz || exit 1
+
+# exec so uvicorn is PID 1 and receives SIGTERM; shell form so the worker count
+# stays a single environment variable rather than a rebuild.
+CMD ["/bin/sh", "-c", \
+     "exec uvicorn dolico_ocr.app:app --host 0.0.0.0 --port 8181 --workers ${DOLICO_OCR_WORKERS}"]

@@ -47,13 +47,14 @@ interface and the routing contracts while they were still cheap to change.
 | Native extraction for 14 formats + Markdown/text | NATS, distributed workers |
 | Real OCR in two tiers, optional and pluggable | A benchmark corpus larger than one real scan |
 | A vision-model third tier for pages OCR loses | Remote MinerU (`DOLICO_MINERU_URL` is written but untested) |
-| Cross-engine disagreement to catch confident misreads | |
-| Layout analysis: scanned tables come back as grids | HTML input |
-| Canonical JSON as the primary API | |
+| Cross-engine disagreement to catch confident misreads | Authentication, rate limiting, tenancy |
+| Layout analysis: scanned tables come back as grids | Blob retention — the store grows forever |
+| Canonical JSON as the primary API | HTML input |
 | Markdown generated as a view | |
 | Parallel page OCR across worker processes | |
 | Bounding boxes, provenance, per-page quality scores | |
 | Content-hash caching at page and document level | |
+| Docker Compose deployment for a single host | |
 
 The OCR tier is optional: with no OCR service configured the API falls back to
 a stub that marks scanned pages as unread rather than silently returning
@@ -85,6 +86,17 @@ pages OCR loses:
 make ocr-vision  # the same service, plus MinerU (torch; ~3.2GB of weights, ~7GB RAM)
 make run-vision  # the API server, with escalation to Tier 3 enabled
 ```
+
+As two containers on one host, for an internal deployment:
+
+```bash
+make deploy-up   # API on 127.0.0.1:8080, OCR service alongside it
+```
+
+That publishes on loopback only, because **dolico has no authentication of any
+kind** — [`deploy/README.md`](deploy/README.md) covers what has to sit in front
+of it, how to size the OCR workers, and what does and does not survive a
+restart.
 
 ```bash
 # Upload and wait for the result

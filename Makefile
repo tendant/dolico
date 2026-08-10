@@ -1,6 +1,7 @@
 .PHONY: help build build-go build-rust run run-ocr run-vision ocr ocr-text ocr-vision \
         test test-go test-rust test-ocr lint fmt e2e e2e-ocr e2e-vision bench bench-ocr \
-        bench-vision bench-hard testdata clean clean-ocr
+        bench-vision bench-hard testdata clean clean-ocr \
+        deploy-build deploy-up deploy-down deploy-logs deploy-config
 
 # Caches live inside the repo so a build never depends on, or pollutes, the
 # machine's shared Go cache.
@@ -51,6 +52,12 @@ help:
 	@echo "  e2e-vision   End-to-end sweep asserting faded.pdf escalated and was recovered"
 	@echo "  bench-vision Score extraction with all three tiers"
 	@echo "  bench-hard   Score the real-scan corpus in testdata/corpus-hard"
+	@echo ""
+	@echo "Deployment (two containers, loopback only -- see deploy/README.md):"
+	@echo "  deploy-build Build the API and OCR images"
+	@echo "  deploy-up    Start them; first run downloads OCR models"
+	@echo "  deploy-logs  Follow both services"
+	@echo "  deploy-down  Stop and remove them (volumes survive)"
 
 build: build-rust build-go
 
@@ -124,6 +131,34 @@ testdata:
 
 clean:
 	@rm -rf bin .gocache .gomodcache rust/dolico-rs/target
+
+# ---------------------------------------------------------------------------
+# Deployment
+#
+# Two containers on one host, published on loopback only. dolico has no
+# authentication, so `deploy` is not the whole job -- read deploy/README.md for
+# what has to sit in front of it.
+# ---------------------------------------------------------------------------
+
+COMPOSE := docker compose -f deploy/docker-compose.yml
+
+deploy-build:
+	@$(COMPOSE) build
+
+deploy-up:
+	@$(COMPOSE) up -d
+	@echo "API on 127.0.0.1:$${DOLICO_PORT:-8080} (loopback only)."
+	@echo "First start downloads OCR models and is unhealthy meanwhile:"
+	@echo "  make deploy-logs"
+
+deploy-down:
+	@$(COMPOSE) down
+
+deploy-logs:
+	@$(COMPOSE) logs -f
+
+deploy-config:
+	@$(COMPOSE) config
 
 # ---------------------------------------------------------------------------
 # OCR tier

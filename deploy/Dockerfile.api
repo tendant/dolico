@@ -1,0 +1,49 @@
+# The API server and the Rust shim it execs.
+#
+# Two builders because the shim is a separate toolchain, and one small runtime
+# holding both binaries. The Go binary is static (CGO_ENABLED=0); the Rust one
+# links against glibc, which is why the runtime is debian-slim rather than
+# scratch or distroless/static.
+
+# --- the shim ---------------------------------------------------------------
+FROM rust:1-bookworm AS shim
+WORKDIR /src
+COPY rust/dolico-rs ./rust/dolico-rs
+RUN cargo build --release --locked --manifest-path rust/dolico-rs/Cargo.toml
+
+# --- the server -------------------------------------------------------------
+FROM golang:1.25-bookworm AS server
+WORKDIR /src
+# No go.sum: this module has no third-party dependencies, so there is nothing
+# to download and nothing to verify.
+COPY go.mod ./
+COPY cmd ./cmd
+COPY internal ./internal
+RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/dolico ./cmd/dolico
+
+# --- runtime ----------------------------------------------------------------
+FROM debian:bookworm-slim
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates curl \
+    && rm -rf /var/lib/apt/lists/* \
+    && useradd --system --create-home --uid 10001 dolico
+
+COPY --from=server /out/dolico /usr/local/bin/dolico
+COPY --from=shim /src/rust/dolico-rs/target/release/dolico-rs /usr/local/bin/dolico-rs
+
+# Set explicitly rather than relying on the binary's relative search, which
+# looks for the shim next to a repository layout that does not exist here.
+ENV DOLICO_SHIM_PATH=/usr/local/bin/dolico-rs \
+    DOLICO_ADDR=:8080 \
+    DOLICO_DATA_DIR=/var/lib/dolico
+
+RUN mkdir -p /var/lib/dolico && chown dolico:dolico /var/lib/dolico
+USER dolico
+EXPOSE 8080
+
+# Liveness only. This checks the process and that the shim is executable; it
+# says nothing about whether the OCR service is reachable.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+    CMD curl -fsS http://127.0.0.1:8080/healthz || exit 1
+
+ENTRYPOINT ["/usr/local/bin/dolico"]

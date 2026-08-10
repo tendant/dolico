@@ -1,0 +1,76 @@
+# Internal deployment: the API server and the OCR tier on one host.
+#
+# The API is published on the loopback interface only. Nothing here does
+# authentication, so exposing 8080 to anything but a gateway you control hands
+# every document in the store to whoever finds the port. See deploy/README.md
+# for what that gateway has to do.
+#
+#   docker compose -f deploy/docker-compose.yml up -d --build
+
+name: dolico
+
+services:
+  ocr:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.ocr
+    environment:
+      # One inference uses about one core and does not thread, so throughput
+      # comes from processes. Each costs ~3GB once warm -- keep this and
+      # mem_limit in step.
+      DOLICO_OCR_WORKERS: ${DOLICO_OCR_WORKERS:-2}
+    volumes:
+      # Models are downloaded on first start. Without this volume every
+      # container restart re-downloads a few hundred megabytes and spends
+      # minutes unhealthy.
+      - paddle-models:/home/dolico/.paddlex
+    mem_limit: ${OCR_MEM_LIMIT:-8g}
+    restart: unless-stopped
+    # Reachable from the api service, not from the host.
+    expose:
+      - "8181"
+    healthcheck:
+      # Spelled out rather than inheriting the image's, because a compose
+      # healthcheck with no `test` merges with the image's differently across
+      # Docker versions -- and this one gates whether the API starts at all.
+      #
+      # start_period is longer than the image's: a cold model volume on a slow
+      # link can take a while, and /healthz returns 503 until every worker has
+      # loaded its models.
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8181/healthz"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 600s
+
+  api:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.api
+    environment:
+      DOLICO_OCR_URL: http://ocr:8181
+      DOLICO_DATA_DIR: /var/lib/dolico
+      # Uploads that use ?wait=true block for up to DOLICO_SHIM_TIMEOUT + 30s.
+      # Whatever sits in front needs a read timeout longer than this.
+      DOLICO_SHIM_TIMEOUT: ${DOLICO_SHIM_TIMEOUT:-120s}
+      DOLICO_MAX_UPLOAD_BYTES: ${DOLICO_MAX_UPLOAD_BYTES:-268435456}
+    depends_on:
+      ocr:
+        # Not just "started": the API exits at boot if the OCR service is
+        # configured and unreachable, which is deliberate -- serving stub text
+        # under a configuration that promises real OCR would be worse.
+        condition: service_healthy
+    volumes:
+      - dolico-data:/var/lib/dolico
+    ports:
+      # Loopback only. Change this and you have published an unauthenticated
+      # document store.
+      - "127.0.0.1:${DOLICO_PORT:-8080}:8080"
+    mem_limit: ${API_MEM_LIMIT:-2g}
+    restart: unless-stopped
+
+volumes:
+  # Blobs and derived documents. Nothing prunes this -- see deploy/README.md.
+  dolico-data:
+  # PaddleOCR model cache. Disposable: deleting it costs a slow first start.
+  paddle-models:

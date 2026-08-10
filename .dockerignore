@@ -1,0 +1,20 @@
+# Build output and caches. These are large, host-specific, and rebuilt inside
+# the image anyway -- sending them to the daemon costs minutes.
+bin/
+.gocache/
+.gomodcache/
+rust/dolico-rs/target/
+python/ocr-service/.venv/
+**/__pycache__/
+**/*.pyc
+.pytest_cache/
+
+.git/
+.github/
+
+# Fixtures are for tests and benchmarks, not for a running service. The faded
+# scan alone is ~950KB and none of it belongs in a deployed image.
+testdata/
+docs/
+*.md
+!python/ocr-service/README.md
