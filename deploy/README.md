@@ -195,11 +195,30 @@ this compose file exposes:
 ## Verifying a deployment
 
 ```bash
+make deploy-verify
+```
+
+This runs the repository's full end-to-end sweep against the containers that
+are already running, rather than against a server it starts for itself: every
+fixture uploaded over HTTP, each returned document validated against
+`schema/canonical-v1.json` by a real JSON Schema validator, per-page routing
+asserted, the scanned table checked for a 5×3 grid in the right order, the error
+paths checked for the right status codes, and re-uploads checked for
+idempotency. It is the same checker `make e2e` uses, pointed somewhere else.
+
+By hand, if you want the three-line version:
+
+```bash
 curl -fsS http://127.0.0.1:8080/healthz | jq          # shim executable, process up
 curl -fsS http://127.0.0.1:8080/v1/engines | jq       # which engines are wired
 curl -F file=@testdata/scanned-table.pdf \
      'http://127.0.0.1:8080/v1/documents?wait=true' | jq '.pages[0].blocks[0]'
 ```
+
+Note that `make test-ocr` will *not* work against this deployment: the OCR
+service is reachable from the API container, not from the host, so the live
+tests in that target have nothing to connect to. They expect a local
+`make ocr`.
 
 `/v1/engines` should list `anydoc`, `pdf-inspector` and `pp-structurev3`. If it
 shows `ocr-stub` instead, the API could not reach the OCR service and is

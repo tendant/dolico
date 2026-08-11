@@ -1,7 +1,7 @@
 .PHONY: help build build-go build-rust run run-ocr run-vision ocr ocr-text ocr-vision \
         test test-go test-rust test-ocr lint fmt e2e e2e-ocr e2e-vision bench bench-ocr \
         bench-vision bench-hard testdata clean clean-ocr \
-        deploy-build deploy-up deploy-down deploy-logs deploy-config
+        deploy-build deploy-up deploy-down deploy-logs deploy-config deploy-verify
 
 # Caches live inside the repo so a build never depends on, or pollutes, the
 # machine's shared Go cache.
@@ -57,6 +57,7 @@ help:
 	@echo "  deploy-build Build the API and OCR images"
 	@echo "  deploy-up    Start them; first run downloads OCR models"
 	@echo "  deploy-logs  Follow both services"
+	@echo "  deploy-verify Run the e2e sweep against the running deployment"
 	@echo "  deploy-down  Stop and remove them (volumes survive)"
 
 build: build-rust build-go
@@ -156,6 +157,14 @@ deploy-down:
 
 deploy-logs:
 	@$(COMPOSE) logs -f
+
+# Run the full e2e sweep against a deployment that is already running, rather
+# than against a server the script starts for itself. Same checker, same schema
+# validation -- the difference is that this one is talking to the containers you
+# are about to put behind a gateway.
+deploy-verify:
+	@DOLICO_EXPECT_OCR=$(EXPECT_OCR) \
+		./scripts/e2e_check.py http://$(HOST):$${DOLICO_PORT:-8080}
 
 deploy-config:
 	@$(COMPOSE) config
