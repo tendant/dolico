@@ -16,6 +16,7 @@ from dolico_ocr.raster import (
     RasteredPage,
     is_pdf,
     render_pdf_pages,
+    MAX_OCR_PIXELS,
     wrap_image,
 )
 
@@ -139,3 +140,74 @@ class TestWrapImage:
     def test_undecodable_bytes_raise(self):
         with pytest.raises(RasterError):
             wrap_image(b"\x00\x01\x02\x03")
+
+
+class TestWrapImageBounds:
+    """A standalone image arrives at whatever resolution a camera chose, so
+    the pixels reaching OCR have to be bounded here or a single upload takes
+    the service down for everyone."""
+
+    def make_jpeg(self, width: int, height: int) -> bytes:
+        import io
+
+        from PIL import Image
+
+        buf = io.BytesIO()
+        Image.new("RGB", (width, height), "white").save(buf, format="JPEG")
+        return buf.getvalue()
+
+    def make_png(self, width: int, height: int) -> bytes:
+        import io
+
+        from PIL import Image
+
+        buf = io.BytesIO()
+        Image.new("RGB", (width, height), "white").save(buf, format="PNG")
+        return buf.getvalue()
+
+    def test_a_large_photo_is_downscaled_to_the_budget(self):
+        page = wrap_image(self.make_jpeg(3400, 4400))[0]
+        pixels = page.image.shape[0] * page.image.shape[1]
+        assert pixels <= MAX_OCR_PIXELS
+
+    def test_the_page_keeps_the_source_dimensions(self):
+        # What was rasterized is an implementation detail; the page a caller
+        # gets back must describe the image they uploaded.
+        page = wrap_image(self.make_jpeg(3400, 4400))[0]
+        assert (page.width_pt, page.height_pt) == (3400.0, 4400.0)
+
+    def test_boxes_map_back_to_the_original_pixels(self):
+        page = wrap_image(self.make_jpeg(3400, 4400))[0]
+        # The bottom-right of the raster is the bottom-right of the source.
+        x, y = page.to_points(page.image.shape[1], page.image.shape[0])
+        assert x == pytest.approx(3400.0, rel=0.01)
+        assert y == pytest.approx(0.0, abs=page.height_pt * 0.01)
+
+    def test_aspect_ratio_survives_the_downscale(self):
+        page = wrap_image(self.make_jpeg(4000, 1000))[0]
+        height, width = page.image.shape[:2]
+        assert width / height == pytest.approx(4.0, rel=0.02)
+
+    def test_a_small_image_is_untouched(self):
+        page = wrap_image(self.make_png(80, 40))[0]
+        assert page.image.shape[:2] == (40, 80)
+        assert page.scale == 1.0
+
+    def test_a_format_that_cannot_draft_is_still_bounded(self):
+        # draft() is a JPEG optimisation; PNG has to be decoded and resized.
+        page = wrap_image(self.make_png(3000, 3000))[0]
+        assert page.image.shape[0] * page.image.shape[1] <= MAX_OCR_PIXELS
+
+    def test_an_absurd_image_is_refused_rather_than_decoded(self):
+        import io
+
+        from PIL import Image
+
+        # Written as a PNG of mostly nothing: 100MP compresses to a few KB,
+        # which is exactly what makes it dangerous to decode. Deliberately
+        # under Pillow's own decompression-bomb ceiling, so this exercises our
+        # limit rather than the library's.
+        buf = io.BytesIO()
+        Image.new("L", (10000, 10000), 0).save(buf, format="PNG")
+        with pytest.raises(RasterError, match="MP"):
+            wrap_image(buf.getvalue())

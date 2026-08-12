@@ -19,6 +19,19 @@ DEFAULT_DPI = 200
 # A PDF point is 1/72 inch, which is what makes DPI and scale interchangeable.
 POINTS_PER_INCH = 72.0
 
+# The pixel budget for a standalone image, matched to what this service already
+# rasterizes without trouble: a letter page at DEFAULT_DPI is 1700x2200, or
+# 3.7MP. Above this an image is downscaled, which costs nothing in accuracy --
+# PaddleOCR's detector resizes internally anyway -- and bounds the memory a
+# single upload can demand.
+MAX_OCR_PIXELS = 4_000_000
+
+# Beyond this, refuse rather than decode. Pillow reads the dimensions from the
+# header before allocating anything, so a 400MP image is rejected for the cost
+# of parsing its header instead of 1.2GB of RGB. Nothing anyone wants read is
+# this large; a decompression bomb is.
+MAX_DECODE_PIXELS = 80_000_000
+
 
 class RasterError(Exception):
     """The document could not be opened or rendered."""
@@ -114,6 +127,14 @@ def wrap_image(data: bytes) -> list[RasteredPage]:
     An image has no intrinsic physical size, so it is reported at 72 DPI --
     one pixel to one point. The bounding boxes are then in pixels-as-points,
     which is the only honest reading when the source carries no page geometry.
+
+    Unlike a PDF, whose raster size this service chooses via DPI, an image
+    arrives at whatever resolution a camera happened to use. A 48MP phone
+    photo decodes to roughly 140MB of RGB before PaddleOCR allocates its own
+    working copies, which is how a single upload OOM-kills a service that
+    handles 200 DPI pages all day -- and it takes every concurrent request
+    down with it, not just the one that caused it. So the pixels handed to OCR
+    are bounded to what the PDF path already produces.
     """
     try:
         import io
@@ -121,17 +142,44 @@ def wrap_image(data: bytes) -> list[RasteredPage]:
         from PIL import Image  # Pillow arrives as a PaddleOCR dependency.
 
         with Image.open(io.BytesIO(data)) as img:
-            rgb = np.array(img.convert("RGB"))
+            width, height = img.size
+            if width * height > MAX_DECODE_PIXELS:
+                raise RasterError(
+                    f"image is {width}x{height}; the limit is "
+                    f"{MAX_DECODE_PIXELS // 1_000_000}MP"
+                )
+            target = _fit(width, height, MAX_OCR_PIXELS)
+            # draft() lets the JPEG decoder downscale as it reads, so the full
+            # resolution is never allocated at all. It is a no-op for formats
+            # that cannot, which the resize below then handles.
+            img.draft("RGB", target)
+            rgb_img = img.convert("RGB")
+            if rgb_img.size != target and rgb_img.width * rgb_img.height > MAX_OCR_PIXELS:
+                rgb_img = rgb_img.resize(target, Image.Resampling.LANCZOS)
+            rgb = np.asarray(rgb_img)
+    except RasterError:
+        raise
     except Exception as exc:
         raise RasterError(f"cannot decode image: {exc}") from exc
 
-    height, width = rgb.shape[:2]
+    # The page keeps the source's own pixel dimensions whatever was rasterized,
+    # so a caller's bounding boxes land on the image they uploaded. `scale`
+    # carries the reduction, exactly as it carries DPI on the PDF path.
+    raster_width = rgb.shape[1]
     return [
         RasteredPage(
             number=1,
             image=rgb,
             width_pt=float(width),
             height_pt=float(height),
-            scale=1.0,
+            scale=raster_width / float(width),
         )
     ]
+
+
+def _fit(width: int, height: int, budget: int) -> tuple[int, int]:
+    """The largest size with this aspect ratio within a pixel budget."""
+    if width * height <= budget:
+        return width, height
+    ratio = (budget / (width * height)) ** 0.5
+    return max(1, int(width * ratio)), max(1, int(height * ratio))
