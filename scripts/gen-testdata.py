@@ -24,6 +24,7 @@ The PDFs are the interesting ones, because they are what exercise routing:
 
   text.pdf           every page has real text operators  -> native extraction
   scanned.pdf        image only, no text operators       -> must route to OCR
+  scanned.jpg        the same page as a bare image       -> must route to OCR
   mixed.pdf          one of each                         -> must route per page
   scanned-table.pdf  a ruled table drawn as pixels       -> needs layout analysis
   faded.pdf          a scan too faint for OCR            -> must escalate to vision
@@ -207,6 +208,18 @@ def write_scanned_pdf() -> None:
     image_page(c, page_image("\n".join(SCANNED_LINES)))
     c.showPage()
     c.save()
+
+
+def write_scanned_jpg() -> None:
+    """The same page as scanned.pdf, with no PDF around it.
+
+    A photograph or a phone scan arrives like this, and it is the case that has
+    no inspector in either Rust library: one page, no text layer, nothing to
+    classify per page. It is saved at the same 1200x1600 as the PDF's embedded
+    image, so a text score against the shared ground truth compares the image
+    path with the PDF path rather than two different renderings.
+    """
+    page_image("\n".join(SCANNED_LINES)).save(OUT / "scanned.jpg", format="JPEG", quality=90)
 
 
 def write_mixed_pdf() -> None:
@@ -462,6 +475,12 @@ def write_ground_truth() -> None:
         "scanned.pdf": {
             "pages": [{"number": 1, "text": [ln for ln in SCANNED_LINES if ln]}]
         },
+        # The same words with no PDF around them: the image path is scored
+        # against the same expectation as the PDF path, so a gap between the
+        # two rows is a gap in the pipeline and not in the fixture.
+        "scanned.jpg": {
+            "pages": [{"number": 1, "text": [ln for ln in SCANNED_LINES if ln]}]
+        },
         # The OCR tiers score close to 1.0 CER on this one. That is the
         # expected result, not a broken expectation: it is what the vision
         # tier's benchmark row is measured against.
@@ -549,6 +568,7 @@ def main() -> None:
     OUT.mkdir(parents=True, exist_ok=True)
     write_text_pdf()
     write_scanned_pdf()
+    write_scanned_jpg()
     write_scanned_table_pdf()
     write_mixed_pdf()
     write_faded_pdf()

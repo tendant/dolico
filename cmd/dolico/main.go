@@ -25,6 +25,7 @@ import (
 	"github.com/tendant/dolico/internal/canonical"
 	"github.com/tendant/dolico/internal/config"
 	"github.com/tendant/dolico/internal/engine"
+	"github.com/tendant/dolico/internal/engine/imagedoc"
 	"github.com/tendant/dolico/internal/engine/ocrstub"
 	"github.com/tendant/dolico/internal/engine/paddleocr"
 	"github.com/tendant/dolico/internal/engine/quality"
@@ -71,7 +72,10 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	registry := engine.NewRegistry(native, pdf, ocr)
+	// The image inspector carries no dependency of its own: it reads a magic
+	// number and hands the page to whatever OCR tier is configured, so a
+	// stubbed OCR means images come back as placeholders rather than text.
+	registry := engine.NewRegistry(native, pdf, imagedoc.New(), ocr)
 	pageCache := cache.New(50_000)
 	vision := visionEngine(cfg, ocr, log)
 

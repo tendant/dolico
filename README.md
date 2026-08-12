@@ -197,6 +197,14 @@ with `pypdfium2`, which keeps pdfium's native dependency out of both the Go
 binary and the Rust shim. It answers with the same canonical envelope the shim
 writes, so one code path in Go parses both.
 
+A standalone image — a photograph or a scan saved as JPEG, PNG, TIFF, BMP, GIF
+or WebP — is a document with one page and no text layer, and neither Rust
+library claims it. `internal/engine/imagedoc` is the inspector that does: it
+reads a magic number, reports one page classified `scanned`, and stops there.
+The existing routing rule for a scanned page does the rest, so images reach the
+OCR tier through exactly the path a scanned PDF page takes, with no new
+extraction code and no special case in the router.
+
 The vision tier lives behind that same service and the same port, reached by a
 `tier=vision` field on the same endpoint. It shares the OCR client's
 concurrency budget rather than getting its own, because it occupies a service
@@ -208,6 +216,7 @@ cmd/dolico/                 API server
 internal/canonical/         the canonical model — the contract everything meets
 internal/engine/            Engine interface + registry
         ├── rustshim/       subprocess transport; native and PDF engines
+        ├── imagedoc/       inspector for standalone images; routes them to OCR
         ├── paddleocr/      HTTP client for the OCR and vision tiers
         ├── ocrstub/        fallback OCR tier when none is configured
         ├── quality/        per-page scoring

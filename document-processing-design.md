@@ -137,6 +137,18 @@ For every page determine:
 
 Only OCR pages requiring OCR.
 
+## Standalone images
+
+-   JPEG
+-   PNG
+-   TIFF
+-   BMP
+-   GIF
+-   WebP
+
+One page, no text layer, nothing to classify. Recognized by magic number and
+sent straight to OCR -- the same route a scanned PDF page takes.
+
 ------------------------------------------------------------------------
 
 # OCR Pipeline

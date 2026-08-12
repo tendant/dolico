@@ -33,6 +33,19 @@
       }
     ]
   },
+  "scanned.jpg": {
+    "pages": [
+      {
+        "number": 1,
+        "text": [
+          "SCANNED INVOICE",
+          "Invoice number 4471",
+          "Amount due 1,250.00",
+          "Due on receipt"
+        ]
+      }
+    ]
+  },
   "faded.pdf": {
     "pages": [
       {

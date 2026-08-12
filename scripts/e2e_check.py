@@ -105,6 +105,9 @@ CASES = [
     # The OCR fixtures are checked separately below, because which engine is
     # acceptable depends on what is wired.
     ("scanned.pdf",       1, set(),             {"pdf-inspector"}),
+    # A bare image: neither Rust library may claim it, and it must not come
+    # back unsupported either.
+    ("scanned.jpg",       1, set(),             {"pdf-inspector", "anydoc"}),
     ("scanned-table.pdf", 1, set(),             {"pdf-inspector"}),
     ("faded.pdf",         1, set(),             {"pdf-inspector"}),
     ("mixed.pdf",         2, {"pdf-inspector"}, set()),
@@ -185,6 +188,23 @@ def main() -> int:
             f"engines: {sorted({b['provenance']['engine'] for b in ocr_blocks})}",
         )
 
+    # A standalone image reaches OCR by a different route -- the image
+    # inspector claims it and classifies its one page as scanned -- so it is
+    # checked on its own rather than assumed to follow from scanned.pdf.
+    image_doc = upload("scanned.jpg").json()
+    check(
+        "the image was inspected as a single page",
+        len(image_doc["pages"]) == 1,
+        f"{len(image_doc['pages'])} pages",
+    )
+    image_blocks = [b for b in blocks(image_doc) if b["provenance"]["engine"] in OCR_ENGINES]
+    check("the image produced OCR blocks, not silence", len(image_blocks) > 0)
+    check(
+        "the image was inspected by the image engine",
+        any(e["engine"].startswith("image:") for e in image_doc["trace"]["engines"]),
+        f"{[e['engine'] for e in image_doc['trace']['engines']]}",
+    )
+
     # mixed.pdf is the design's central claim: page 1 native, page 2 OCR.
     mixed = upload("mixed.pdf").json()
     page_engines = [
@@ -199,6 +219,22 @@ def main() -> int:
         text = " ".join(b.get("text", "") for b in blocks(doc)).upper()
         for word in ("INVOICE", "4471"):
             check(f"real OCR recovered {word!r} from the pixels", word in text, f"got {text[:120]!r}")
+        # scanned.jpg is the same page without the PDF around it, so the same
+        # words must come back: a difference here is the image path losing
+        # something, not a different document.
+        image_text = " ".join(b.get("text", "") for b in blocks(image_doc)).upper()
+        for word in ("INVOICE", "4471"):
+            check(
+                f"real OCR recovered {word!r} from the bare image",
+                word in image_text,
+                f"got {image_text[:120]!r}",
+            )
+        image_page = image_doc["pages"][0]
+        check(
+            "the image page reports its pixel dimensions",
+            image_page.get("width") and image_page.get("height"),
+            f"width={image_page.get('width')} height={image_page.get('height')}",
+        )
         # OCR is the only tier that reports a genuine per-block confidence, and
         # the only one that knows the page size, because it renders.
         check(
