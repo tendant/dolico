@@ -48,13 +48,13 @@ interface and the routing contracts while they were still cheap to change.
 | Real OCR in two tiers, optional and pluggable | A benchmark corpus larger than one real scan |
 | A vision-model third tier for pages OCR loses | Remote MinerU (`DOLICO_MINERU_URL` is written but untested) |
 | Cross-engine disagreement to catch confident misreads | Authentication, rate limiting, tenancy |
-| Layout analysis: scanned tables come back as grids | Blob retention on age — deletion is explicit, so an orphaned document is kept forever |
+| Layout analysis: scanned tables come back as grids | Postgres, MinIO, durable jobs (also listed above) |
 | Canonical JSON as the primary API | HTML input |
 | Markdown generated as a view | |
 | Parallel page OCR across worker processes | |
 | Bounding boxes, provenance, per-page quality scores | |
 | Content-hash caching at page and document level | |
-| Deletion, so a retention policy elsewhere can be true | |
+| Deletion by name, and an age backstop for what that cannot reach | |
 | Docker Compose deployment for a single host | |
 
 The OCR tier is optional: with no OCR service configured the API falls back to
@@ -360,6 +360,9 @@ tagged `estimated_glyph_widths` in its classification reasons.
 | `DOLICO_OCR_URL` | unset | OCR service address; unset means the stub tier |
 | `DOLICO_OCR_TIMEOUT` | `10m` | bound on one OCR request |
 | `DOLICO_OCR_CONCURRENCY` | service's worker count | OCR requests in flight at once |
+| `DOLICO_OCR_WAIT` | `90s` | how long to keep trying to reach the OCR service at startup |
+| `DOLICO_BLOB_TTL` | unset | delete documents older than this; unset keeps them forever |
+| `DOLICO_BLOB_SWEEP_EVERY` | `1h` | how often that runs |
 | `DOLICO_VISION_ENABLED` | off | escalate bad OCR pages to the vision tier |
 | `DOLICO_VISION_THRESHOLD` | `0.35` | page quality below which vision is tried |
 | `DOLICO_VISION_MAX_PAGES` | `5` | vision escalations per document |
@@ -368,8 +371,25 @@ tagged `estimated_glyph_widths` in its classification reasons.
 
 Setting `DOLICO_OCR_URL` to a service that is not reachable is a startup
 failure, not a silent fallback: a deployment configured for OCR that quietly
-serves stub text would be worse than one that refuses to start. The OCR
-service has [its own configuration](python/ocr-service/README.md#configuration).
+serves stub text would be worse than one that refuses to start. It is retried
+for `DOLICO_OCR_WAIT` first, because deployed beside its OCR service this
+process routinely wins the race to start and a CNI that programs network
+policy asynchronously refuses the first connections outright — without the
+wait, every rollout is a crash-loop that resolves itself. A service that
+*answers*, wrongly, is not retried: a schema this build cannot read will still
+be unreadable in ninety seconds. The OCR service has [its own
+configuration](python/ocr-service/README.md#configuration).
+
+`DOLICO_BLOB_TTL` is a backstop, not a retention policy. Documents are meant to
+be deleted by name, by whoever knows the policy — but that only reaches
+documents something still points at, and a document whose owner's record was
+lost is unreachable and therefore undeletable by anyone who would know to ask.
+Set it **above the longest window whatever sits in front enforces**; for
+dolico-pay that is `PAY_UNPAID_RETENTION_HOURS` + `PAY_RETENTION_DAYS`, since a
+session must be paid for inside the unpaid window. Too short and it deletes a
+document a customer is still entitled to, which fails silently here and looks
+like a broken purchase there. Unset — the default — nothing is ever deleted on
+age, and anything that leaks stays forever.
 
 `DOLICO_VISION_ENABLED` is the opposite: asking for a tier the service does not
 have is a warning and a two-tier run, not a startup failure. Tier 3 is an

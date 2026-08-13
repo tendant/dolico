@@ -45,6 +45,12 @@ const Name = "paddleocr"
 // StructureName is the identifier the layout-analysis tier reports.
 const StructureName = "pp-structurev3"
 
+// ErrUnreachable means the service could not be contacted at all, as opposed
+// to answering with something wrong. Only the first is worth waiting through:
+// a service that is not listening yet will start, while one emitting a schema
+// this build cannot read will still be emitting it in ninety seconds.
+var ErrUnreachable = errors.New("paddleocr: cannot reach the OCR service")
+
 // DefaultTimeout bounds one OCR request. OCR is slow -- seconds per page on
 // CPU, and a multi-page escalation is a multiple of that -- so this is much
 // more generous than any other call in the pipeline.
@@ -170,14 +176,14 @@ func (e *Engine) Version() string {
 func (e *Engine) BaseURL() string { return e.baseURL }
 
 type versionResponse struct {
-	SchemaVersion  string `json:"schema_version"`
-	ServiceVersion string `json:"service_version"`
-	Engine         string `json:"engine"`
-	EngineVersion  string `json:"engine_version"`
-	Tier           string `json:"tier"`
-	Workers        int    `json:"workers"`
-	VisionAvailable bool  `json:"vision_available"`
-	VisionEngine   string `json:"vision_engine"`
+	SchemaVersion   string `json:"schema_version"`
+	ServiceVersion  string `json:"service_version"`
+	Engine          string `json:"engine"`
+	EngineVersion   string `json:"engine_version"`
+	Tier            string `json:"tier"`
+	Workers         int    `json:"workers"`
+	VisionAvailable bool   `json:"vision_available"`
+	VisionEngine    string `json:"vision_engine"`
 }
 
 func (e *Engine) refreshVersion(ctx context.Context) error {
@@ -190,9 +196,14 @@ func (e *Engine) refreshVersion(ctx context.Context) error {
 	}
 	resp, err := e.client.Do(req)
 	if err != nil {
-		return fmt.Errorf("paddleocr: cannot reach the OCR service at %s: %w", e.baseURL, err)
+		return fmt.Errorf("%w at %s: %w", ErrUnreachable, e.baseURL, err)
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusServiceUnavailable || resp.StatusCode == http.StatusBadGateway {
+		// The service is there but not serving yet -- still starting, or
+		// behind a proxy that has not found it. Worth waiting for.
+		return fmt.Errorf("%w at %s: %s", ErrUnreachable, e.baseURL, resp.Status)
+	}
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("paddleocr: %s/v1/version returned %s", e.baseURL, resp.Status)
 	}

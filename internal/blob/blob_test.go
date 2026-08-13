@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 func newStore(t *testing.T) *Store {
@@ -232,5 +233,118 @@ func TestConcurrentPutsOfTheSameContent(t *testing.T) {
 	got, _ := io.ReadAll(f)
 	if string(got) != "concurrent payload" {
 		t.Errorf("content corrupted by concurrent writes: %q", got)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Removal and the age backstop
+// ---------------------------------------------------------------------------
+
+func TestRemoveTakesTheBytesAndEverythingDerived(t *testing.T) {
+	s := newStore(t)
+	digest, _, err := s.Put(strings.NewReader("a document"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.WriteDerived(digest, "canonical.json", []byte(`{"id":"x"}`)); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := s.Remove(digest); err != nil {
+		t.Fatalf("Remove: %v", err)
+	}
+	if s.Exists(digest) {
+		t.Error("the blob is still there")
+	}
+	if _, err := s.ReadDerived(digest, "canonical.json"); !errors.Is(err, ErrNotFound) {
+		// The derived JSON *is* the document: leaving it behind would keep
+		// serving what was supposed to be deleted.
+		t.Errorf("derived artifact survived: %v", err)
+	}
+}
+
+func TestRemoveIsIdempotent(t *testing.T) {
+	s := newStore(t)
+	digest, _, err := s.Put(strings.NewReader("gone twice"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Remove(digest); err != nil {
+		t.Fatalf("first: %v", err)
+	}
+	if err := s.Remove(digest); err != nil {
+		t.Errorf("second: %v", err)
+	}
+}
+
+// age backdates a blob, standing in for time passing.
+func age(t *testing.T, s *Store, digest string, d time.Duration) {
+	t.Helper()
+	when := time.Now().Add(-d)
+	if err := os.Chtimes(s.Path(digest), when, when); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSweepRemovesWhatIsPastTheTTL(t *testing.T) {
+	s := newStore(t)
+	old, _, err := s.Put(strings.NewReader("forgotten"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.WriteDerived(old, "canonical.json", []byte(`{}`)); err != nil {
+		t.Fatal(err)
+	}
+	fresh, _, err := s.Put(strings.NewReader("still wanted"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	age(t, s, old, 40*24*time.Hour)
+
+	removed, err := s.Sweep(35*24*time.Hour, time.Now())
+	if err != nil {
+		t.Fatalf("Sweep: %v", err)
+	}
+	if len(removed) != 1 || removed[0] != old {
+		t.Fatalf("removed = %v, want [%s]", removed, old)
+	}
+	if s.Exists(old) {
+		t.Error("the old blob is still there")
+	}
+	if _, err := s.ReadDerived(old, "canonical.json"); !errors.Is(err, ErrNotFound) {
+		t.Error("the old document's derived artifacts survived")
+	}
+	if !s.Exists(fresh) {
+		t.Error("a blob inside the window was deleted")
+	}
+}
+
+func TestSweepWithNoTTLDeletesNothing(t *testing.T) {
+	s := newStore(t)
+	digest, _, err := s.Put(strings.NewReader("keep me"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	age(t, s, digest, 10*365*24*time.Hour)
+
+	// Zero means keep forever. A missing or mistyped setting must not be a way
+	// to start deleting data.
+	removed, err := s.Sweep(0, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(removed) != 0 || !s.Exists(digest) {
+		t.Errorf("removed %v with no TTL set", removed)
+	}
+}
+
+func TestSweepOnAnEmptyStore(t *testing.T) {
+	s := newStore(t)
+	removed, err := s.Sweep(time.Hour, time.Now())
+	if err != nil {
+		t.Fatalf("Sweep: %v", err)
+	}
+	if len(removed) != 0 {
+		t.Errorf("removed = %v", removed)
 	}
 }

@@ -122,6 +122,50 @@ func run() error {
 			"Start python/ocr-service and set DOLICO_OCR_URL for real OCR")
 	}
 
+	// The backstop for documents nothing points at any more. Deletion proper
+	// is explicit and belongs to whoever knows the policy; this only catches
+	// what that can no longer reach, which is precisely the set nobody can
+	// find on purpose.
+	stopSweep := func() {}
+	if cfg.BlobTTL > 0 {
+		log.Info("blob retention", "ttl", cfg.BlobTTL, "every", cfg.BlobSweepEvery)
+		ctx, cancel := context.WithCancel(context.Background())
+		stopSweep = cancel
+		go func() {
+			sweep := func() {
+				removed, err := store.Sweep(cfg.BlobTTL, time.Now())
+				if err != nil {
+					log.Error("blob sweep", "error", err, "removed", len(removed))
+				}
+				for _, id := range removed {
+					pageCache.Forget(id)
+				}
+				if len(removed) > 0 {
+					// Loud on purpose. Anything this deletes was supposed to
+					// have been deleted by name, so a non-zero count is a
+					// count of things that leaked.
+					log.Warn("swept documents nothing had deleted by name",
+						"removed", len(removed), "ttl", cfg.BlobTTL)
+				}
+			}
+			sweep() // at boot, so a restart is not a way to postpone deletion
+			ticker := time.NewTicker(cfg.BlobSweepEvery)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-ticker.C:
+					sweep()
+				}
+			}
+		}()
+	} else {
+		log.Warn("blob retention is off: documents are kept forever unless deleted by name. " +
+			"Set DOLICO_BLOB_TTL above the longest window your front end enforces")
+	}
+	defer stopSweep()
+
 	errs := make(chan error, 1)
 	go func() {
 		if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -161,15 +205,45 @@ func ocrEngine(cfg *config.Config, log *slog.Logger) (engine.Engine, error) {
 	if cfg.OCRURL == "" {
 		return ocrstub.New(), nil
 	}
-	ocr, err := paddleocr.New(cfg.OCRURL,
-		paddleocr.WithTimeout(cfg.OCRTimeout),
-		paddleocr.WithConcurrency(cfg.OCRConcurrency),
-		paddleocr.WithLogger(log))
-	if err != nil {
-		// Configuring an OCR service and then starting without it would mean
-		// silently serving stub text under a configuration that says
-		// otherwise. Refusing to start is the honest failure.
-		return nil, fmt.Errorf("%w\nstart it with: make ocr", err)
+	// Retried rather than attempted once, because "not there yet" and "not
+	// there" are different and only the second is worth dying for. Deployed
+	// beside its OCR service, this process routinely loses the race: the pods
+	// start together, and until the CNI has programmed the network policy for
+	// the new pod the connection is refused outright -- observed as
+	// `connect: operation not permitted`, three restarts per rollout, a
+	// crash-loop that always resolved itself a minute later.
+	//
+	// What is not retried is a service that answers wrongly. Only reaching it
+	// is retried; a bad response still fails immediately.
+	deadline := time.Now().Add(cfg.OCRWait)
+	var ocr *paddleocr.Engine
+	var err error
+	for attempt := 1; ; attempt++ {
+		ocr, err = paddleocr.New(cfg.OCRURL,
+			paddleocr.WithTimeout(cfg.OCRTimeout),
+			paddleocr.WithConcurrency(cfg.OCRConcurrency),
+			paddleocr.WithLogger(log))
+		if err == nil {
+			break
+		}
+		if !errors.Is(err, paddleocr.ErrUnreachable) {
+			// It answered, and answered wrongly -- a schema this build cannot
+			// read, or a status that is not a starting service. Waiting will
+			// not change that, so fail now with the real reason instead of
+			// ninety seconds of the wrong one.
+			return nil, fmt.Errorf("%w\nstart it with: make ocr", err)
+		}
+		if time.Now().After(deadline) {
+			// Configuring an OCR service and then starting without it would
+			// mean silently serving stub text under a configuration that says
+			// otherwise. Refusing to start is the honest failure.
+			return nil, fmt.Errorf("%w\nunreachable for %s\nstart it with: make ocr",
+				err, cfg.OCRWait)
+		}
+		log.Info("waiting for the OCR service",
+			"url", cfg.OCRURL, "attempt", attempt,
+			"give_up_in", time.Until(deadline).Truncate(time.Second), "error", err)
+		time.Sleep(2 * time.Second)
 	}
 	log.Info("OCR tier connected",
 		"url", ocr.BaseURL(), "engine", ocr.Name(), "tier", ocr.Tier(),

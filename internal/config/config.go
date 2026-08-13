@@ -42,6 +42,35 @@ type Config struct {
 	// OCRTimeout bounds a single OCR request. OCR is seconds per page, so this
 	// is far more generous than the shim timeout.
 	OCRTimeout time.Duration
+	// OCRWait is how long to keep trying to reach the OCR service at startup
+	// before giving up and refusing to start.
+	//
+	// Refusing is right -- a process configured for real OCR that quietly
+	// serves stub text is worse than one that will not start -- but demanding
+	// the service be reachable in the same instant this one boots is stricter
+	// than that intent needs. On Kubernetes the two pods come up together and
+	// the CNI programs network policy asynchronously, so the first connection
+	// is refused with EPERM for a second or two. Without a wait, every
+	// deployment is a crash-loop that resolves itself and looks like an
+	// outage while it does.
+	OCRWait time.Duration
+	// BlobTTL deletes documents older than this, whatever anything else
+	// believes about them.
+	//
+	// A backstop, not the retention policy: deletion proper is explicit, and
+	// this only catches what explicit deletion cannot reach -- a document
+	// nothing points at any more, which is unreachable and therefore
+	// undeletable by anyone who would know to ask.
+	//
+	// Zero means keep forever, and is the default, so an upgrade cannot
+	// quietly begin deleting data. Set it above the longest window whatever
+	// sits in front enforces. For dolico-pay that is
+	// PAY_UNPAID_RETENTION_HOURS + PAY_RETENTION_DAYS: a session must be paid
+	// for within the unpaid window, so an upload can be entitled to live at
+	// most those two added together.
+	BlobTTL time.Duration
+	// BlobSweepEvery is how often that runs.
+	BlobSweepEvery time.Duration
 	// OCRConcurrency is how many OCR requests may be in flight at once. Zero
 	// means match the number of worker processes the service reports, which
 	// is almost always right: more requests than workers only queue on the far
@@ -73,15 +102,17 @@ type Config struct {
 // Load reads configuration from the environment, applying defaults.
 func Load() (*Config, error) {
 	c := &Config{
-		Addr:           env("DOLICO_ADDR", ":8080"),
-		DataDir:        env("DOLICO_DATA_DIR", filepath.Join(os.TempDir(), "dolico")),
-		Workers:        runtime.NumCPU(),
-		ShimPath:       env("DOLICO_SHIM_PATH", ""),
-		ShimTimeout:    120 * time.Second,
-		OCRThreshold:   0.60,
-		MaxUploadBytes: 256 << 20,
-		OCRURL:          env("DOLICO_OCR_URL", ""),
-		OCRTimeout:      10 * time.Minute,
+		Addr:               env("DOLICO_ADDR", ":8080"),
+		DataDir:            env("DOLICO_DATA_DIR", filepath.Join(os.TempDir(), "dolico")),
+		Workers:            runtime.NumCPU(),
+		ShimPath:           env("DOLICO_SHIM_PATH", ""),
+		ShimTimeout:        120 * time.Second,
+		OCRThreshold:       0.60,
+		MaxUploadBytes:     256 << 20,
+		OCRURL:             env("DOLICO_OCR_URL", ""),
+		OCRTimeout:         10 * time.Minute,
+		OCRWait:            90 * time.Second,
+		BlobSweepEvery:     time.Hour,
 		VisionEnabled:      envBool("DOLICO_VISION_ENABLED", false),
 		VisionThreshold:    0.35,
 		VisionMaxPages:     5,
@@ -107,6 +138,24 @@ func Load() (*Config, error) {
 	}
 	if c.OCRTimeout, err = envDuration("DOLICO_OCR_TIMEOUT", c.OCRTimeout); err != nil {
 		return nil, err
+	}
+	if c.OCRWait, err = envDuration("DOLICO_OCR_WAIT", c.OCRWait); err != nil {
+		return nil, err
+	}
+	if c.OCRWait < 0 {
+		return nil, fmt.Errorf("DOLICO_OCR_WAIT must not be negative, got %s", c.OCRWait)
+	}
+	if c.BlobTTL, err = envDuration("DOLICO_BLOB_TTL", c.BlobTTL); err != nil {
+		return nil, err
+	}
+	if c.BlobTTL < 0 {
+		return nil, fmt.Errorf("DOLICO_BLOB_TTL must not be negative, got %s", c.BlobTTL)
+	}
+	if c.BlobSweepEvery, err = envDuration("DOLICO_BLOB_SWEEP_EVERY", c.BlobSweepEvery); err != nil {
+		return nil, err
+	}
+	if c.BlobSweepEvery <= 0 {
+		return nil, fmt.Errorf("DOLICO_BLOB_SWEEP_EVERY must be positive, got %s", c.BlobSweepEvery)
 	}
 	if c.OCRConcurrency, err = envInt("DOLICO_OCR_CONCURRENCY", c.OCRConcurrency); err != nil {
 		return nil, err

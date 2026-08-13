@@ -16,7 +16,9 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
+	"time"
 )
 
 // ErrNotFound is returned when a digest or derived artifact is not in the
@@ -172,6 +174,70 @@ func (s *Store) Remove(docID string) error {
 		errs = append(errs, fmt.Errorf("blob: remove blob: %w", err))
 	}
 	return errors.Join(errs...)
+}
+
+// Sweep deletes documents older than ttl and returns the ids that went.
+//
+// This is a backstop, not the retention policy. Deletion proper is explicit --
+// whoever holds the customer relationship knows when a window closed and calls
+// Remove. But that only ever reaches documents something still points at. A
+// document whose owner's record was lost, or that was stored and then
+// abandoned before anything recorded it, is unreachable and would otherwise
+// live forever precisely because nothing knows it exists.
+//
+// So the age here must be set well above the longest window the caller
+// enforces, and it is a caller's job to know that number: this package cannot
+// see the sessions, the payments or the policy. Too short and it deletes a
+// document someone is still entitled to; the failure is silent on this side
+// and looks like a broken purchase on theirs.
+//
+// Age is the blob's modification time, which is when the bytes arrived. It is
+// deliberately not access time: relatime means atime barely moves, so a
+// document read every day can still look untouched, and a policy resting on
+// that would be resting on a filesystem mount option.
+func (s *Store) Sweep(ttl time.Duration, now time.Time) (removed []string, err error) {
+	if ttl <= 0 {
+		return nil, nil
+	}
+	cutoff := now.Add(-ttl)
+	prefixes, err := os.ReadDir(filepath.Join(s.root, "blobs"))
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("blob: sweep: %w", err)
+	}
+	for _, prefix := range prefixes {
+		if !prefix.IsDir() {
+			continue
+		}
+		dir := filepath.Join(s.root, "blobs", prefix.Name())
+		entries, readErr := os.ReadDir(dir)
+		if readErr != nil {
+			err = errors.Join(err, readErr)
+			continue
+		}
+		for _, e := range entries {
+			if e.IsDir() {
+				continue
+			}
+			info, statErr := e.Info()
+			if statErr != nil {
+				// Unreadable is not the same as old. Left alone.
+				continue
+			}
+			if !info.ModTime().Before(cutoff) {
+				continue
+			}
+			if rmErr := s.Remove(e.Name()); rmErr != nil {
+				err = errors.Join(err, rmErr)
+				continue
+			}
+			removed = append(removed, e.Name())
+		}
+	}
+	sort.Strings(removed)
+	return removed, err
 }
 
 // ReadDerived loads a derived artifact.
