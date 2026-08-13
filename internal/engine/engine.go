@@ -30,6 +30,22 @@ var (
 	ErrEncrypted = errors.New("engine: encrypted input")
 )
 
+// Kind classifies an engine failure into the vocabulary the API answers with,
+// so that a document rejected during inspection and the same document rejected
+// during extraction give a caller the same word for the same problem.
+func Kind(err error) string {
+	switch {
+	case errors.Is(err, ErrUnsupported):
+		return "unsupported"
+	case errors.Is(err, ErrEncrypted):
+		return "encrypted"
+	case errors.Is(err, ErrMalformed):
+		return "malformed"
+	default:
+		return "internal"
+	}
+}
+
 // SupportScore is how well an engine believes it can handle an input, 0..100.
 // The router picks the highest scorer. Scores are advisory; an engine that
 // returns a high score and then fails is a bug in that engine.

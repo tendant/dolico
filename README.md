@@ -151,7 +151,8 @@ curl -s localhost:8080/v1/documents/$(curl -s localhost:8080/v1/jobs/$JOB | jq -
 
 | Method | Path | |
 | --- | --- | --- |
-| `POST` | `/v1/documents` | multipart upload → `202`. `?wait=true` blocks and returns the document. |
+| `POST` | `/v1/documents` | multipart upload → `202`. `?wait=true` blocks and returns the document. A JSON body `{sha256, filename, media_type}` extracts bytes already stored, so an inspected document is not uploaded twice. |
+| `POST` | `/v1/inspect` | multipart upload → what the document *is*: page count, page kinds, and a count of pages by classification. Stores the bytes and returns their digest; extracts nothing. |
 | `GET` | `/v1/jobs/{id}` | job state, engine timings, error detail |
 | `GET` | `/v1/jobs` | all jobs, newest first |
 | `GET` | `/v1/documents/{id}` | canonical JSON |
@@ -163,6 +164,14 @@ curl -s localhost:8080/v1/documents/$(curl -s localhost:8080/v1/jobs/$JOB | jq -
 Every response carries `X-Trace-Id`. Failures map to status codes by cause:
 `415` unsupported format, `422` malformed or encrypted document, `413` too
 large, `503` queue full.
+
+`/v1/inspect` exists because "how big is this, and what will it cost" is worth
+being able to ask before paying for the answer. Inspection is the cheap step by
+design -- pdf-inspector reads structure without rendering, the native engines
+read a container's manifest -- so a caller can refuse a 500-page document in
+milliseconds rather than discovering its size after the extraction it was
+trying to avoid. The inspection is cached by digest, so extracting afterwards
+does not repeat it.
 
 ## How it is put together
 

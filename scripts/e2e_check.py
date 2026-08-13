@@ -124,6 +124,40 @@ def main() -> int:
     if failures:
         return 1
 
+    # Inspection: the cheap question, answered without extracting. A caller
+    # deciding whether a document is worth extracting depends on this being
+    # both accurate and free of side effects.
+    #
+    # Runs before the sweep, because "inspection did not extract" can only be
+    # observed on a document nothing has extracted yet -- afterwards every
+    # fixture is in the store and the check would pass vacuously either way.
+    print("\ninspect")
+    files = {"file": ("mixed.pdf", (TESTDATA / "mixed.pdf").read_bytes())}
+    insp = requests.post(f"{BASE}/v1/inspect", files=files, timeout=60)
+    check("inspect answered", insp.ok, f"HTTP {insp.status_code}: {insp.text[:200]}")
+    if insp.ok:
+        body = insp.json()
+        check("inspect reports the page count", body.get("page_count") == 2, f"{body.get('page_count')}")
+        check(
+            "inspect separates text pages from scanned ones",
+            body.get("page_types", {}).get("text_based") == 1,
+            f"{body.get('page_types')}",
+        )
+        # Extraction is the expensive half; inspection must not have done it.
+        served = requests.get(f"{BASE}/v1/documents/{body['document_id']}", timeout=30)
+        check("inspect did not extract", served.status_code == 404, f"HTTP {served.status_code}")
+        # And the digest it returned is enough to extract without re-uploading.
+        again = requests.post(
+            f"{BASE}/v1/documents?wait=true",
+            json={"sha256": body["sha256"], "filename": body["filename"],
+                  "media_type": body["media_type"]},
+            timeout=300,
+        )
+        check("the digest alone starts extraction", again.ok, f"HTTP {again.status_code}: {again.text[:200]}")
+        if again.ok:
+            check("extracting by digest returns the same document",
+                  again.json()["id"] == body["document_id"], f"{again.json()['id']}")
+
     for fixture, min_blocks, expected, forbidden in CASES:
         print(f"\n{fixture}")
         resp = upload(fixture)

@@ -641,3 +641,169 @@ func TestHealthzReportsShimStatus(t *testing.T) {
 		t.Errorf("unexpected health payload: %s", body)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Inspection
+//
+// The point of the endpoint is that a caller can learn what a document is
+// before paying for the extraction. So these tests are as much about what does
+// *not* happen -- no extraction, no derived files -- as about the answer.
+// ---------------------------------------------------------------------------
+
+func (h *harness) inspect(t *testing.T, fixture string) (int, []byte) {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(h.root, "testdata", fixture))
+	if err != nil {
+		t.Fatalf("fixture %s: %v", fixture, err)
+	}
+	var body bytes.Buffer
+	mw := multipart.NewWriter(&body)
+	part, err := mw.CreateFormFile("file", fixture)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := part.Write(data); err != nil {
+		t.Fatal(err)
+	}
+	mw.Close()
+
+	resp, err := http.Post(h.server.URL+"/v1/inspect", mw.FormDataContentType(), &body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	out, _ := io.ReadAll(resp.Body)
+	return resp.StatusCode, out
+}
+
+type inspection struct {
+	DocumentID string         `json:"document_id"`
+	SHA256     string         `json:"sha256"`
+	Filename   string         `json:"filename"`
+	MediaType  string         `json:"media_type"`
+	SizeBytes  int64          `json:"size_bytes"`
+	Engine     string         `json:"engine"`
+	PageCount  int            `json:"page_count"`
+	PageKind   string         `json:"page_kind"`
+	PageTypes  map[string]int `json:"page_types"`
+}
+
+func TestInspectReportsPageCountWithoutExtracting(t *testing.T) {
+	h := newHarness(t)
+	code, body := h.inspect(t, "text.pdf")
+	if code != http.StatusOK {
+		t.Fatalf("status %d, body %s", code, body)
+	}
+	var got inspection
+	if err := json.Unmarshal(body, &got); err != nil {
+		t.Fatalf("decode: %v (%s)", err, body)
+	}
+	if got.PageCount != 2 {
+		t.Errorf("page_count = %d, want 2", got.PageCount)
+	}
+	if got.Engine != "pdf-inspector" {
+		t.Errorf("engine = %q, want pdf-inspector", got.Engine)
+	}
+	if got.PageTypes["text_based"] != 2 {
+		t.Errorf("page_types = %v, want 2 text_based", got.PageTypes)
+	}
+	if got.DocumentID == "" || got.DocumentID != got.SHA256 {
+		t.Errorf("document_id %q and sha256 %q should be the same digest", got.DocumentID, got.SHA256)
+	}
+
+	// Nothing was extracted: the document is not servable yet. That is the
+	// whole economy of the endpoint -- if inspection quietly extracted, it
+	// would cost exactly what it exists to avoid.
+	if status, _, _ := h.get(t, "/v1/documents/"+got.DocumentID); status != http.StatusNotFound {
+		t.Errorf("document is servable after inspection: status %d, want 404", status)
+	}
+}
+
+func TestInspectSeparatesScannedFromTextPages(t *testing.T) {
+	h := newHarness(t)
+	code, body := h.inspect(t, "mixed.pdf")
+	if code != http.StatusOK {
+		t.Fatalf("status %d, body %s", code, body)
+	}
+	var got inspection
+	if err := json.Unmarshal(body, &got); err != nil {
+		t.Fatal(err)
+	}
+	// mixed.pdf is one text page and one scanned page. A caller deciding
+	// whether to proceed cares which, because the two cost different work.
+	if got.PageCount != 2 {
+		t.Fatalf("page_count = %d, want 2", got.PageCount)
+	}
+	if got.PageTypes["text_based"] != 1 {
+		t.Errorf("page_types = %v, want 1 text_based", got.PageTypes)
+	}
+	scanned := got.PageTypes["scanned"] + got.PageTypes["image_based"]
+	if scanned != 1 {
+		t.Errorf("page_types = %v, want 1 scanned or image_based", got.PageTypes)
+	}
+}
+
+func TestInspectRejectsWhatCannotBeRead(t *testing.T) {
+	h := newHarness(t)
+	if code, body := h.inspect(t, "corrupt.pdf"); code != http.StatusUnprocessableEntity {
+		t.Errorf("corrupt.pdf: status %d, want 422 (body %s)", code, body)
+	}
+}
+
+func TestInspectThenExtractDoesNotResendTheBytes(t *testing.T) {
+	h := newHarness(t)
+	code, body := h.inspect(t, "text.pdf")
+	if code != http.StatusOK {
+		t.Fatalf("inspect: status %d, body %s", code, body)
+	}
+	var got inspection
+	if err := json.Unmarshal(body, &got); err != nil {
+		t.Fatal(err)
+	}
+
+	// The second call carries a digest, not a document.
+	ref, _ := json.Marshal(map[string]string{
+		"sha256": got.SHA256, "filename": got.Filename, "media_type": got.MediaType,
+	})
+	resp, err := http.Post(h.server.URL+"/v1/documents?wait=true", "application/json", bytes.NewReader(ref))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	out, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("extract: status %d, body %s", resp.StatusCode, out)
+	}
+	var doc canonical.Document
+	if err := json.Unmarshal(out, &doc); err != nil {
+		t.Fatalf("decode document: %v", err)
+	}
+	if len(doc.Pages) != 2 {
+		t.Errorf("pages = %d, want 2", len(doc.Pages))
+	}
+	if doc.ID != got.DocumentID {
+		t.Errorf("document id = %q, want %q", doc.ID, got.DocumentID)
+	}
+	if doc.Source.Filename != "text.pdf" {
+		t.Errorf("filename = %q, want text.pdf; the detection hint was lost", doc.Source.Filename)
+	}
+}
+
+func TestExtractingAnUnknownDigestSaysToUploadItAgain(t *testing.T) {
+	h := newHarness(t)
+	ref, _ := json.Marshal(map[string]string{
+		"sha256": strings.Repeat("a", 64), "filename": "ghost.pdf",
+	})
+	resp, err := http.Post(h.server.URL+"/v1/documents", "application/json", bytes.NewReader(ref))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	out, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("status %d, want 404 (body %s)", resp.StatusCode, out)
+	}
+	if !strings.Contains(string(out), "upload it again") {
+		t.Errorf("body %s does not say what to do about it", out)
+	}
+}

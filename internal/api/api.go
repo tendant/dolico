@@ -63,6 +63,7 @@ func New(deps Deps) *Server {
 func (s *Server) Routes() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /v1/documents", s.uploadDocument)
+	mux.HandleFunc("POST /v1/inspect", s.inspectDocument)
 	mux.HandleFunc("GET /v1/jobs", s.listJobs)
 	mux.HandleFunc("GET /v1/jobs/{id}", s.getJob)
 	// "{id}.md" is not a legal ServeMux pattern -- a wildcard has to be a
@@ -127,7 +128,24 @@ type uploadResponse struct {
 	State      string `json:"state"`
 }
 
+// storedRequest asks for extraction of bytes the store already holds, named by
+// the digest a prior inspection returned.
+type storedRequest struct {
+	SHA256    string `json:"sha256"`
+	Filename  string `json:"filename"`
+	MediaType string `json:"media_type"`
+}
+
 func (s *Server) uploadDocument(w http.ResponseWriter, r *http.Request) {
+	// A JSON body means "extract what you already have". Inspection stores the
+	// bytes, so a caller that inspected first and then decided to proceed
+	// refers to the digest instead of sending the same hundred megabytes
+	// twice.
+	if ct := r.Header.Get("Content-Type"); strings.HasPrefix(ct, "application/json") {
+		s.extractStored(w, r)
+		return
+	}
+
 	r.Body = http.MaxBytesReader(w, r.Body, s.deps.MaxUploadBytes)
 
 	file, header, err := r.FormFile("file")
@@ -165,6 +183,59 @@ func (s *Server) uploadDocument(w http.ResponseWriter, r *http.Request) {
 		// makes the second run nearly free.
 		DocumentID: digest,
 	}
+	s.submitJob(w, r, job)
+}
+
+// extractStored starts a job for bytes already in the store.
+func (s *Server) extractStored(w http.ResponseWriter, r *http.Request) {
+	var req storedRequest
+	if err := json.NewDecoder(io.LimitReader(r.Body, 4<<10)).Decode(&req); err != nil {
+		s.fail(w, r, http.StatusBadRequest, "bad_request",
+			"expected a JSON body with a 'sha256' field")
+		return
+	}
+	if req.SHA256 == "" {
+		s.fail(w, r, http.StatusBadRequest, "bad_request", "sha256 is required")
+		return
+	}
+	// A digest naming bytes this store does not hold is not a 404 on some
+	// resource the caller can go and fetch: it means whatever inspected those
+	// bytes was a different deployment, or the blob has since been swept. Both
+	// are fixed by uploading the file again, which is what the message says.
+	if !s.deps.Store.Exists(req.SHA256) {
+		s.fail(w, r, http.StatusNotFound, "not_found",
+			fmt.Sprintf("no stored document with digest %s; upload it again", req.SHA256))
+		return
+	}
+	f, err := s.deps.Store.Open(req.SHA256)
+	if err != nil {
+		s.fail(w, r, http.StatusInternalServerError, "storage", err.Error())
+		return
+	}
+	info, err := f.Stat()
+	f.Close()
+	if err != nil {
+		s.fail(w, r, http.StatusInternalServerError, "storage", err.Error())
+		return
+	}
+
+	filename := filepath.Base(req.Filename)
+	job := &jobs.Job{
+		TraceID:  traceID(r.Context()),
+		Filename: filename,
+		// The filename is a detection hint for formats with no content
+		// signature, so it is carried through from the inspection rather than
+		// re-derived from a digest that has no extension.
+		MediaType:  mediaType(filename, req.MediaType),
+		SHA256:     req.SHA256,
+		SizeBytes:  info.Size(),
+		DocumentID: req.SHA256,
+	}
+	s.submitJob(w, r, job)
+}
+
+// submitJob queues a job and answers, either immediately or after it finishes.
+func (s *Server) submitJob(w http.ResponseWriter, r *http.Request, job *jobs.Job) {
 	if err := s.deps.Jobs.Submit(job); err != nil {
 		s.fail(w, r, http.StatusServiceUnavailable, "queue_full",
 			"the processing queue is full; retry shortly")
@@ -191,9 +262,106 @@ func (s *Server) uploadDocument(w http.ResponseWriter, r *http.Request) {
 	s.writeJSON(w, http.StatusAccepted, uploadResponse{
 		JobID:      job.ID,
 		DocumentID: job.DocumentID,
-		SHA256:     digest,
+		SHA256:     job.SHA256,
 		TraceID:    job.TraceID,
 		State:      string(jobs.StateQueued),
+	})
+}
+
+// inspectResponse is what a document is, without extracting it.
+type inspectResponse struct {
+	DocumentID string             `json:"document_id"`
+	SHA256     string             `json:"sha256"`
+	Filename   string             `json:"filename"`
+	MediaType  string             `json:"media_type"`
+	SizeBytes  int64              `json:"size_bytes"`
+	Engine     string             `json:"engine"`
+	PageCount  int                `json:"page_count"`
+	PageKind   canonical.PageKind `json:"page_kind"`
+	// PageTypes counts pages by classification, which is what a caller
+	// deciding whether to proceed actually reasons about: fifty scanned pages
+	// and fifty text pages cost different amounts of very different work.
+	PageTypes map[string]int     `json:"page_types,omitempty"`
+	Metadata  canonical.Metadata `json:"metadata"`
+	TraceID   string             `json:"trace_id"`
+}
+
+// inspectDocument answers what a document is without extracting it.
+//
+// This exists because "how big is this" is a question worth being able to ask
+// before paying for the answer. Inspection is the cheap step by design -- the
+// PDF inspector reads structure without rendering, and the native engines read
+// a container's manifest -- so a caller can refuse a 500-page document in
+// milliseconds instead of discovering its size after the extraction it was
+// trying to avoid.
+//
+// The bytes are stored, not discarded: the store is content-addressed, so the
+// digest returned here is the document id, and extracting it afterwards costs
+// one JSON call rather than a second upload of the same file.
+func (s *Server) inspectDocument(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, s.deps.MaxUploadBytes)
+
+	file, header, err := r.FormFile("file")
+	if err != nil {
+		var maxErr *http.MaxBytesError
+		if errors.As(err, &maxErr) {
+			s.fail(w, r, http.StatusRequestEntityTooLarge, "upload_too_large",
+				fmt.Sprintf("upload exceeds the %d byte limit", s.deps.MaxUploadBytes))
+			return
+		}
+		s.fail(w, r, http.StatusBadRequest, "bad_request",
+			"expected a multipart form with a 'file' field")
+		return
+	}
+	defer file.Close()
+
+	digest, size, err := s.deps.Store.Put(file)
+	if err != nil {
+		s.fail(w, r, http.StatusInternalServerError, "storage", err.Error())
+		return
+	}
+	if size == 0 {
+		s.fail(w, r, http.StatusBadRequest, "empty_upload", "the uploaded file is empty")
+		return
+	}
+
+	src := canonical.Source{
+		Filename:  filepath.Base(header.Filename),
+		MediaType: mediaType(header.Filename, header.Header.Get("Content-Type")),
+		SHA256:    digest,
+		SizeBytes: size,
+	}
+	insp, eng, err := s.deps.Registry.Inspect(r.Context(), src, s.deps.Store.Path(digest))
+	if err != nil {
+		kind := engine.Kind(err)
+		code := http.StatusInternalServerError
+		switch kind {
+		case "unsupported":
+			code = http.StatusUnsupportedMediaType
+		case "malformed", "encrypted":
+			code = http.StatusUnprocessableEntity
+		}
+		s.fail(w, r, code, kind, err.Error())
+		return
+	}
+
+	types := make(map[string]int, 4)
+	for _, p := range insp.Pages {
+		types[string(p.Classification.Type)]++
+	}
+
+	s.writeJSON(w, http.StatusOK, inspectResponse{
+		DocumentID: digest,
+		SHA256:     digest,
+		Filename:   src.Filename,
+		MediaType:  src.MediaType,
+		SizeBytes:  size,
+		Engine:     eng.Name(),
+		PageCount:  insp.PageCount,
+		PageKind:   insp.PageKind,
+		PageTypes:  types,
+		Metadata:   insp.Metadata,
+		TraceID:    traceID(r.Context()),
 	})
 }
 

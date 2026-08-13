@@ -327,16 +327,8 @@ func storedPageCount(store *blob.Store, docID string, log *slog.Logger) (int, bo
 	return len(doc.Pages), true
 }
 
-// errorKind classifies a routing failure for the API's status mapping.
-func errorKind(err error) string {
-	switch {
-	case router.IsUnsupported(err):
-		return "unsupported"
-	case errors.Is(err, engine.ErrEncrypted):
-		return "encrypted"
-	case router.IsBadDocument(err):
-		return "malformed"
-	default:
-		return "internal"
-	}
-}
+// errorKind classifies a routing failure for the API's status mapping. The
+// classification itself lives with the errors, in package engine, so the
+// inspect endpoint and the extraction path cannot drift apart on what to call
+// the same failure.
+func errorKind(err error) string { return engine.Kind(err) }
