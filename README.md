@@ -48,12 +48,13 @@ interface and the routing contracts while they were still cheap to change.
 | Real OCR in two tiers, optional and pluggable | A benchmark corpus larger than one real scan |
 | A vision-model third tier for pages OCR loses | Remote MinerU (`DOLICO_MINERU_URL` is written but untested) |
 | Cross-engine disagreement to catch confident misreads | Authentication, rate limiting, tenancy |
-| Layout analysis: scanned tables come back as grids | Blob retention — the store grows forever |
+| Layout analysis: scanned tables come back as grids | Blob retention on age — deletion is explicit, so an orphaned document is kept forever |
 | Canonical JSON as the primary API | HTML input |
 | Markdown generated as a view | |
 | Parallel page OCR across worker processes | |
 | Bounding boxes, provenance, per-page quality scores | |
 | Content-hash caching at page and document level | |
+| Deletion, so a retention policy elsewhere can be true | |
 | Docker Compose deployment for a single host | |
 
 The OCR tier is optional: with no OCR service configured the API falls back to
@@ -158,6 +159,7 @@ curl -s localhost:8080/v1/documents/$(curl -s localhost:8080/v1/jobs/$JOB | jq -
 | `GET` | `/v1/documents/{id}` | canonical JSON |
 | `GET` | `/v1/documents/{id}.md` | Markdown view |
 | `GET` | `/v1/documents/{id}/assets/{asset}` | extracted asset bytes |
+| `DELETE` | `/v1/documents/{id}` | removes the uploaded bytes, the extraction and its assets → `204`. Idempotent. |
 | `GET` | `/v1/engines` | engines, versions, cache stats |
 | `GET` | `/healthz` | liveness, including that the shim is executable |
 

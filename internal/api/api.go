@@ -69,6 +69,7 @@ func (s *Server) Routes() http.Handler {
 	// "{id}.md" is not a legal ServeMux pattern -- a wildcard has to be a
 	// whole path segment -- so the extension is dispatched inside the handler.
 	mux.HandleFunc("GET /v1/documents/{id}", s.getDocument)
+	mux.HandleFunc("DELETE /v1/documents/{id}", s.deleteDocument)
 	mux.HandleFunc("GET /v1/documents/{id}/assets/{asset}", s.getAsset)
 	mux.HandleFunc("GET /v1/engines", s.listEngines)
 	mux.HandleFunc("GET /healthz", s.health)
@@ -363,6 +364,49 @@ func (s *Server) inspectDocument(w http.ResponseWriter, r *http.Request) {
 		Metadata:   insp.Metadata,
 		TraceID:    traceID(r.Context()),
 	})
+}
+
+// deleteDocument removes a document and everything derived from it.
+//
+// This is what makes a retention policy elsewhere true. dolico holds the
+// uploaded bytes and the extraction; whoever holds the customer relationship
+// holds the reason to delete them, and knows when. So the decision lives there
+// and the capability lives here.
+//
+// Idempotent by design: deleting something already gone answers 204. The
+// caller is a sweep that retries, and it should be able to run twice without
+// having to distinguish "I deleted it" from "it was already deleted" -- both
+// mean the document is not on this disk.
+func (s *Server) deleteDocument(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if !validDocumentID(id) {
+		s.fail(w, r, http.StatusBadRequest, "bad_request", "not a document id")
+		return
+	}
+	if err := s.deps.Store.Remove(id); err != nil {
+		s.fail(w, r, http.StatusInternalServerError, "storage", err.Error())
+		return
+	}
+	// The disk is not the only place the document lives.
+	dropped := s.deps.Cache.Forget(id)
+	s.deps.Log.Info("document deleted",
+		"document_id", id, "cache_entries_dropped", dropped, "trace_id", traceID(r.Context()))
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// validDocumentID guards the path segment before it reaches the filesystem.
+// Document ids are content digests, so anything else is a caller error rather
+// than a document that happens to be missing.
+func validDocumentID(id string) bool {
+	if len(id) != 64 {
+		return false
+	}
+	for _, c := range id {
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 func (s *Server) getJob(w http.ResponseWriter, r *http.Request) {

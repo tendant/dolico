@@ -807,3 +807,115 @@ func TestExtractingAnUnknownDigestSaysToUploadItAgain(t *testing.T) {
 		t.Errorf("body %s does not say what to do about it", out)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Deletion
+//
+// A retention policy is a promise about bytes on a disk. These tests are about
+// whether the bytes are actually gone -- all of them, in every place the
+// document lives.
+// ---------------------------------------------------------------------------
+
+func (h *harness) delete(t *testing.T, docID string) int {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodDelete, h.server.URL+"/v1/documents/"+docID, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	io.Copy(io.Discard, resp.Body)
+	return resp.StatusCode
+}
+
+func TestDeleteRemovesTheDocumentAndTheUploadedBytes(t *testing.T) {
+	h := newHarness(t)
+	doc := h.uploadDoc(t, "text.pdf")
+
+	if code := h.delete(t, doc.ID); code != http.StatusNoContent {
+		t.Fatalf("delete: status %d, want 204", code)
+	}
+
+	// Nothing readable is left: not the canonical JSON, not the Markdown, and
+	// not the file that was uploaded.
+	if status, _, _ := h.get(t, "/v1/documents/"+doc.ID); status != http.StatusNotFound {
+		t.Errorf("canonical JSON still served: status %d", status)
+	}
+	if status, _, _ := h.get(t, "/v1/documents/"+doc.ID+".md"); status != http.StatusNotFound {
+		t.Errorf("markdown still served: status %d", status)
+	}
+	if h.store.Exists(doc.Source.SHA256) {
+		t.Error("the uploaded bytes are still in the blob store")
+	}
+}
+
+func TestDeleteIsIdempotent(t *testing.T) {
+	h := newHarness(t)
+	doc := h.uploadDoc(t, "sample.md")
+
+	if code := h.delete(t, doc.ID); code != http.StatusNoContent {
+		t.Fatalf("first delete: status %d, want 204", code)
+	}
+	// The caller is a sweep that retries. Deleting something already gone is
+	// the outcome it wanted, not an error to handle.
+	if code := h.delete(t, doc.ID); code != http.StatusNoContent {
+		t.Errorf("second delete: status %d, want 204", code)
+	}
+}
+
+func TestDeletedContentDoesNotComeBackFromTheCache(t *testing.T) {
+	h := newHarness(t)
+	doc := h.uploadDoc(t, "text.pdf")
+	text := documentText(doc)
+	if text == "" {
+		t.Fatal("fixture produced no text to check against")
+	}
+
+	if code := h.delete(t, doc.ID); code != http.StatusNoContent {
+		t.Fatalf("delete: status %d", code)
+	}
+
+	// Re-uploading the same bytes is the same digest, so a page cache that
+	// kept the deleted pages would serve the old extraction straight back --
+	// content that was supposed to be gone, returned without ever re-reading
+	// the file. It has to be re-extracted instead.
+	again := h.uploadDoc(t, "text.pdf")
+	if again.ID != doc.ID {
+		t.Fatalf("content addressing broke: %q then %q", doc.ID, again.ID)
+	}
+	if len(again.Trace.Engines) == 0 {
+		t.Error("the document came back with no engine run recorded; it was not re-extracted")
+	}
+}
+
+func TestDeleteRejectsSomethingThatIsNotADocumentID(t *testing.T) {
+	h := newHarness(t)
+	// A document id is a content digest. Anything else is a caller error, and
+	// the point is that none of it reaches the filesystem.
+	for _, id := range []string{"short", strings.Repeat("z", 64), "NOTHEX" + strings.Repeat("0", 58)} {
+		if code := h.delete(t, id); code != http.StatusBadRequest {
+			t.Errorf("delete %q: status %d, want 400", id, code)
+		}
+	}
+	// Traversal never gets as far as the handler: ServeMux resolves the path
+	// first and finds no route. Asserted anyway, because "the router happens
+	// to stop it" is worth knowing if the routing ever changes.
+	if code := h.delete(t, "../../etc/passwd"); code == http.StatusNoContent {
+		t.Error("a traversal path was accepted as a document id")
+	}
+}
+
+// documentText joins every block's text, for asserting on what a document says.
+func documentText(doc canonical.Document) string {
+	var b strings.Builder
+	for _, p := range doc.Pages {
+		for _, blk := range p.Blocks {
+			b.WriteString(blk.Text)
+			b.WriteByte(' ')
+		}
+	}
+	return strings.TrimSpace(b.String())
+}

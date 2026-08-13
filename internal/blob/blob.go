@@ -152,6 +152,28 @@ func (s *Store) WriteDerived(docID, name string, data []byte) error {
 	return nil
 }
 
+// Remove deletes a document: the uploaded bytes and everything derived from
+// them.
+//
+// Idempotent, because the caller is a retention sweep rather than a user
+// action. A sweep that failed halfway and runs again must be able to finish the
+// job, and "it was already gone" is the outcome it wanted either way.
+//
+// Derived artifacts go first. They are the readable form -- the extracted text,
+// the assets -- so if only one half can be deleted, that is the half worth
+// losing. A leftover blob is bytes nobody can reach through the API; a leftover
+// canonical.json is the document itself, still served.
+func (s *Store) Remove(docID string) error {
+	var errs []error
+	if err := os.RemoveAll(s.DocDir(docID)); err != nil {
+		errs = append(errs, fmt.Errorf("blob: remove derived: %w", err))
+	}
+	if err := os.Remove(s.Path(docID)); err != nil && !errors.Is(err, os.ErrNotExist) {
+		errs = append(errs, fmt.Errorf("blob: remove blob: %w", err))
+	}
+	return errors.Join(errs...)
+}
+
 // ReadDerived loads a derived artifact.
 func (s *Store) ReadDerived(docID, name string) ([]byte, error) {
 	data, err := os.ReadFile(filepath.Join(s.DocDir(docID), safeSegment(name)))

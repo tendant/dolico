@@ -155,6 +155,36 @@ func (c *Cache) Put(k Key, page canonical.Page) {
 	c.pages[k.String()] = clonePage(page)
 }
 
+// Forget drops everything cached for one document and reports how many entries
+// went.
+//
+// Deleting a document has to reach in here as well as the disk. Page text is
+// the document -- a cache that kept it after the bytes were deleted for
+// retention would be quietly holding the thing that was supposed to be gone,
+// and would serve it back on the next request for the same digest.
+func (c *Cache) Forget(documentHash string) int {
+	if documentHash == "" {
+		return 0
+	}
+	prefix := documentHash + "|"
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	dropped := 0
+	for key := range c.pages {
+		if strings.HasPrefix(key, prefix) {
+			delete(c.pages, key)
+			dropped++
+		}
+	}
+	for key := range c.assets {
+		if strings.HasPrefix(key, prefix) {
+			delete(c.assets, key)
+			dropped++
+		}
+	}
+	return dropped
+}
+
 // Stats reports hit and miss counts and the number of retained pages.
 func (c *Cache) Stats() (hits, misses int64, size int) {
 	c.mu.RLock()
