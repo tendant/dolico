@@ -5,10 +5,14 @@
 # reliable source of subtle breakage. The image is larger for it; that is the
 # trade being made on purpose.
 #
-# The vision tier is not installed here. Adding it means `--extra vision`
-# below, which pulls torch and roughly triples the image, plus ~3.2GB of model
-# weights on first run and ~7GB of memory per worker instead of ~3GB. See
-# deploy/README.md before turning it on.
+# The vision tier is opt-in through OCR_EXTRAS, which is a space-separated
+# list of extras turned into `--extra` flags below. It defaults to `structure`
+# alone; building with OCR_EXTRAS="structure vision" adds Tier 3, which pulls
+# torch and roughly triples the image, plus ~3.2GB of model weights on first
+# run and ~7GB of memory per worker instead of ~3GB. See deploy/README.md
+# before turning it on -- the memory figure is steady state, not a peak,
+# because the disagreement probe keeps MinerU resident for every document
+# with a scanned page.
 #
 # **This image is amd64 only.** PaddlePaddle ships no Linux aarch64 wheels --
 # checked against PyPI, which has manylinux1_x86_64, macosx_11_0_arm64 and
@@ -32,11 +36,13 @@ RUN apt-get update \
 WORKDIR /app
 
 # Dependencies first, so that editing the service does not reinstall Paddle.
+ARG OCR_EXTRAS="structure"
+
 COPY python/ocr-service/pyproject.toml python/ocr-service/uv.lock ./
-RUN uv sync --frozen --extra structure --no-install-project
+RUN uv sync --frozen $(for e in $OCR_EXTRAS; do echo --extra $e; done) --no-install-project
 
 COPY python/ocr-service/dolico_ocr ./dolico_ocr
-RUN uv sync --frozen --extra structure \
+RUN uv sync --frozen $(for e in $OCR_EXTRAS; do echo --extra $e; done) \
     && chown -R dolico:dolico /app \
     # Create the model cache in the image, owned by the user that will write to
     # it. Docker initializes an empty named volume from whatever is at the
