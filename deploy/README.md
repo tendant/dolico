@@ -15,6 +15,37 @@ start until the OCR service is healthy, so `docker compose up` will sit there
 for a few minutes the first time and start quickly on every restart after,
 because the models live in a volume.
 
+## Or pull prebuilt images instead of building
+
+Building here is for the machine that produces the images. Every other host
+should pull them: the OCR image is ~4.2GB and pulls the PaddlePaddle wheels,
+and building it on each server is minutes of CPU to arrive at bytes CI already
+produced.
+
+`dolico-stack/ci/pipeline.hcl` builds both images on every push to `main` and
+pushes them to `reg.memochat.ai` tagged with the 7-character commit SHA, plus a
+moving `latest`. So a new host needs this compose file and a registry login —
+not a clone, a Go toolchain or a Rust one:
+
+```bash
+docker login reg.memochat.ai
+export DOLICO_TAG=39d18d6            # the commit you mean to run
+docker compose -f docker-compose.yml pull
+docker compose -f docker-compose.yml up -d --no-build
+```
+
+**Pin `DOLICO_TAG`.** It defaults to `latest` so the build host's `make
+deploy-up` keeps working, but a server left on `latest` with
+`restart: unless-stopped` picks up a different version on its next reboot,
+which is a version change nobody performed and nobody logged.
+
+**Pass `--no-build`.** A service that has a build section as well as an image
+name is built, not pulled, when compose cannot find the image — so a typo in
+the tag turns a pull into a silent local build rather than an error. `--no-build`
+makes it an error.
+
+`DOLICO_REGISTRY` overrides the registry host if the images live somewhere else.
+
 ## The OCR image is amd64 only
 
 PaddlePaddle publishes no Linux aarch64 wheels — PyPI has `manylinux1_x86_64`,
@@ -144,9 +175,22 @@ delete a document that is still referenced by a job someone is about to poll.
 
 ## Upgrading
 
+On the build host:
+
 ```bash
 docker compose -f deploy/docker-compose.yml up -d --build
 ```
+
+On a host running prebuilt images, an upgrade is a tag change:
+
+```bash
+DOLICO_TAG=<new-sha> docker compose -f docker-compose.yml pull
+DOLICO_TAG=<new-sha> docker compose -f docker-compose.yml up -d --no-build
+```
+
+Keep `DOLICO_TAG` somewhere the next `up` will read it — an `.env` beside the
+compose file — or the containers revert to whatever `latest` resolves to the
+next time someone restarts them without the variable set.
 
 Two version numbers change what happens to cached work:
 
@@ -185,6 +229,8 @@ this compose file exposes:
 
 | Variable | Default | |
 | --- | --- | --- |
+| `DOLICO_REGISTRY` | `reg.memochat.ai` | where the images are pulled from |
+| `DOLICO_TAG` | `latest` | image tag; pin it to a commit SHA on a server |
 | `DOLICO_PORT` | `8080` | host port, bound to `127.0.0.1` |
 | `DOLICO_OCR_WORKERS` | `2` | OCR processes; also the client's concurrency |
 | `OCR_MEM_LIMIT` | `8g` | keep at roughly `workers × 3GB` + headroom |

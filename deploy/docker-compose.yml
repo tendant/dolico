@@ -11,6 +11,18 @@ name: dolico
 
 services:
   ocr:
+    # Named, so a host that is not the build host can pull instead of building
+    # a 4.2GB image for itself:
+    #
+    #   DOLICO_TAG=39d18d6 docker compose pull
+    #   DOLICO_TAG=39d18d6 docker compose up -d --no-build
+    #
+    # `--no-build` is not decoration: with a build section present, compose
+    # quietly builds an image it cannot find rather than failing, which is the
+    # fallback a server is trying to avoid. Pin DOLICO_TAG to the commit SHA CI
+    # pushed; `latest` is a convenience for the build host, and a server left on
+    # it changes version on its next restart.
+    image: ${DOLICO_REGISTRY:-reg.memochat.ai}/dolico-ocr:${DOLICO_TAG:-latest}
     build:
       context: ..
       dockerfile: deploy/Dockerfile.ocr
@@ -58,6 +70,7 @@ services:
       start_period: 600s
 
   api:
+    image: ${DOLICO_REGISTRY:-reg.memochat.ai}/dolico-api:${DOLICO_TAG:-latest}
     build:
       context: ..
       dockerfile: deploy/Dockerfile.api
