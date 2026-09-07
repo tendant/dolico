@@ -22,7 +22,15 @@ services:
     # fallback a server is trying to avoid. Pin DOLICO_TAG to the commit SHA CI
     # pushed; `latest` is a convenience for the build host, and a server left on
     # it changes version on its next restart.
-    image: ${DOLICO_REGISTRY:-reg.memochat.ai}/dolico-ocr:${DOLICO_TAG:-latest}
+    #
+    # The registry is a prefix and not a required field. Unset, the name is a
+    # bare `dolico-ocr:tag` -- which is what a build host wants, since an image
+    # it built and will never push has no business carrying a registry it did
+    # not come from. Set DOLICO_REGISTRY to pull or push, and note that no
+    # registry is hardcoded here: this repository is public, and one written in
+    # would be both wrong for most readers and a standing invitation to push
+    # somewhere by accident.
+    image: ${DOLICO_REGISTRY:+${DOLICO_REGISTRY}/}dolico-ocr:${DOLICO_TAG:-latest}
     build:
       context: ..
       dockerfile: deploy/Dockerfile.ocr
@@ -77,7 +85,7 @@ services:
       start_period: 600s
 
   api:
-    image: ${DOLICO_REGISTRY:-reg.memochat.ai}/dolico-api:${DOLICO_TAG:-latest}
+    image: ${DOLICO_REGISTRY:+${DOLICO_REGISTRY}/}dolico-api:${DOLICO_TAG:-latest}
     build:
       context: ..
       dockerfile: deploy/Dockerfile.api

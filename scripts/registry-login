@@ -22,8 +22,8 @@ registry="${DOLICO_REGISTRY:-$(value DOLICO_REGISTRY)}"
 user="${DOLICO_REGISTRY_USER:-$(value DOLICO_REGISTRY_USER)}"
 password="${DOLICO_REGISTRY_PASSWORD:-$(value DOLICO_REGISTRY_PASSWORD)}"
 
-if [ -z "$registry" ] || [ "$registry" = local ]; then
-    echo "DOLICO_REGISTRY is '${registry:-unset}', which is not somewhere to push." >&2
+if [ -z "$registry" ]; then
+    echo "DOLICO_REGISTRY is not set, so there is nothing to log in to." >&2
     echo "Set it in $ENV_FILE, e.g. DOLICO_REGISTRY=reg.memochat.ai" >&2
     exit 1
 fi

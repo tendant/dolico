@@ -4,24 +4,28 @@ Two containers on one host: the API server and the OCR tier. The vision tier is
 not included — see *Turning on the vision tier* below.
 
 ```bash
-make image      # local/dolico-api:dev, local/dolico-ocr:dev
+make image      # dolico-api:dev, dolico-ocr:dev
 make up
 curl -F file=@testdata/mixed.pdf 'http://127.0.0.1:8080/v1/documents?wait=true'
 ```
 
-`make image` names what it builds `local/dolico-{api,ocr}:dev`, because a
-build host is producing images for itself and a registry name on something
-that will never be pushed reads like a lie in `docker images`. Override with
-`DOLICO_REGISTRY` and `DOLICO_TAG` when you do mean to push:
+`make image` names what it builds `dolico-api:dev` and `dolico-ocr:dev`, with
+no registry prefix at all — an image built here and never pushed has no
+business carrying the name of a registry it did not come from. Set
+`DOLICO_REGISTRY` when you do mean to push or pull, and the same names gain the
+prefix:
 
 ```bash
 DOLICO_REGISTRY=reg.memochat.ai DOLICO_TAG=$(git rev-parse --short=7 HEAD) \
-  make image
+  make image        # reg.memochat.ai/dolico-api:<sha>
 ```
 
-No target here pushes; `docker push` is the only command that talks to a
-registry, and CI is what runs it. Calling compose directly still works, and
-defaults to the registry name rather than the local one:
+No registry is written into the compose file. This repository is public, so one
+hardcoded there would be wrong for most people reading it and a standing
+invitation to push somewhere by accident.
+
+Calling compose directly still works and behaves identically — an unset
+`DOLICO_REGISTRY` is simply no prefix:
 
 ```bash
 docker compose -f deploy/docker-compose.yml up -d --build
@@ -48,10 +52,17 @@ not a clone, a Go toolchain or a Rust one:
 
 ```bash
 docker login reg.memochat.ai
+export DOLICO_REGISTRY=reg.memochat.ai
 export DOLICO_TAG=39d18d6            # the commit you mean to run
 docker compose -f docker-compose.yml pull
 docker compose -f docker-compose.yml up -d --no-build
 ```
+
+Both variables, and both in the `.env` beside the compose file on a server that
+will restart unattended. `DOLICO_REGISTRY` is what turns `dolico-api:39d18d6`
+into something pullable; without it compose looks for a local image by that
+bare name, finds none, and — because the service has a build section — tries to
+build it, which is what `--no-build` is there to turn into an error.
 
 **Pin `DOLICO_TAG`.** The compose file defaults it to `latest` so that a bare
 `docker compose` invocation resolves to something at all — `make` sets `dev`
@@ -85,9 +96,9 @@ make image
 make push
 ```
 
-`make push` refuses while `DOLICO_REGISTRY` is `local` — the default, and a
-name that would otherwise produce a confusing failure deep inside docker rather
-than an obvious one here.
+`make push` refuses while `DOLICO_REGISTRY` is unset, since the images then
+carry no registry in their names and have nowhere to go — a failure worth
+getting here rather than deep inside docker.
 
 **The password is optional and does not have to be there at all.** With no
 `DOLICO_REGISTRY_PASSWORD`, `make login` runs an ordinary interactive
@@ -437,7 +448,7 @@ this compose file exposes:
 | `PYPI_FILES_MIRROR` | unset | host to rewrite `files.pythonhosted.org` to in `uv.lock`; the one that speeds up the OCR build |
 | `PIP_INDEX_URL` | unset | PyPI index for pip and for re-resolving; not consulted by `uv sync --frozen` |
 | `DEBIAN_MIRROR` | unset | replaces `deb.debian.org` in the OCR image's apt sources |
-| `DOLICO_REGISTRY` | `reg.memochat.ai` | where images are pulled from; `make image` defaults it to `local` |
+| `DOLICO_REGISTRY` | unset | registry prefix on the image names; unset means a bare `dolico-api:tag`, built and never pushed |
 | `DOLICO_TAG` | `latest` | image tag; `make image` defaults it to `dev`. Pin it to a commit SHA on a server |
 | `DOLICO_REGISTRY_USER` | unset | registry username, for `make login` |
 | `DOLICO_REGISTRY_PASSWORD` | unset | registry password; unset means `make login` prompts |
