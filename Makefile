@@ -163,6 +163,13 @@ DOLICO_REGISTRY ?= local
 DOLICO_TAG ?= dev
 export DOLICO_REGISTRY DOLICO_TAG
 
+# Optional build-time mirrors, exported so that both
+# `CARGO_REGISTRY_MIRROR=... make image` and `make image CARGO_REGISTRY_MIRROR=...`
+# reach the build. Unset here on purpose: no mirror URL is committed, because
+# the right one depends on where you are, and a stale one in the repository is
+# worse than none.
+export CARGO_REGISTRY_MIRROR
+
 IMAGE_API := $(DOLICO_REGISTRY)/dolico-api:$(DOLICO_TAG)
 IMAGE_OCR := $(DOLICO_REGISTRY)/dolico-ocr:$(DOLICO_TAG)
 

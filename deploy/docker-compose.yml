@@ -74,6 +74,10 @@ services:
     build:
       context: ..
       dockerfile: deploy/Dockerfile.api
+      args:
+        # Empty unless it is set in the environment. Nothing is committed with
+        # a value -- see deploy/README.md, "Building behind a slow index".
+        CARGO_REGISTRY_MIRROR: ${CARGO_REGISTRY_MIRROR:-}
     environment:
       DOLICO_OCR_URL: http://ocr:8181
       DOLICO_DATA_DIR: /var/lib/dolico

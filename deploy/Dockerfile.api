@@ -18,6 +18,26 @@
 # --- the shim ---------------------------------------------------------------
 FROM rust:1-bookworm AS shim
 WORKDIR /src
+
+# An optional crates.io mirror, for networks where the upstream index is slow
+# or blocked. Empty by default, and no value belongs in this repository: pass
+# one at build time and it stays in your environment.
+#
+#   CARGO_REGISTRY_MIRROR=sparse+https://mirrors.ustc.edu.cn/crates.io-index/ \
+#     make image
+#
+# Source replacement, not a different registry: crates still resolve by the
+# names and versions in Cargo.lock and are still verified against its
+# checksums, so `--locked` below means what it meant before. A mirror serving
+# different bytes fails the build rather than changing what it produces.
+ARG CARGO_REGISTRY_MIRROR=
+RUN if [ -n "$CARGO_REGISTRY_MIRROR" ]; then \
+        mkdir -p "$CARGO_HOME" \
+        && printf '[source.crates-io]\nreplace-with = "mirror"\n\n[source.mirror]\nregistry = "%s"\n' \
+            "$CARGO_REGISTRY_MIRROR" > "$CARGO_HOME/config.toml" \
+        && echo "cargo: crates.io replaced with $CARGO_REGISTRY_MIRROR"; \
+    fi
+
 COPY rust/dolico-rs ./rust/dolico-rs
 RUN cargo build --release --locked --manifest-path rust/dolico-rs/Cargo.toml
 

@@ -97,6 +97,54 @@ flag alone on amd64, where oneDNN works and is the faster path.
 
 The API image has no such constraint and builds natively for the host.
 
+## Building behind a slow index
+
+The Rust stage fetches crates from `crates.io`, which on some networks is slow
+enough to dominate the build or unreachable outright. `CARGO_REGISTRY_MIRROR`
+points it somewhere else:
+
+```bash
+CARGO_REGISTRY_MIRROR=sparse+https://mirrors.ustc.edu.cn/crates.io-index/ make image
+```
+
+Or, since a mirror is a property of where you are and not of the build, put it
+in an `.env` beside the compose file so every later `make image` picks it up:
+
+```bash
+# deploy/.env  -- gitignored
+CARGO_REGISTRY_MIRROR=sparse+https://mirrors.ustc.edu.cn/crates.io-index/
+```
+
+**No mirror URL is committed, and none should be.** The variable is empty by
+default and the Dockerfile then writes no cargo config at all, so an unset
+value means upstream `crates.io` — the right default for a build machine
+anywhere else. A URL checked in here would be wrong for half the people who
+clone this and stale for the rest.
+
+This is source replacement, not a different registry: crates still resolve by
+the names and versions in `Cargo.lock`, and are still checked against its
+hashes. `cargo build --locked` means exactly what it meant before, and a mirror
+serving different bytes fails the build rather than quietly changing what it
+produces. Tsinghua's index
+(`sparse+https://mirrors.tuna.tsinghua.edu.cn/crates.io-index/`) works the same
+way.
+
+Nothing equivalent is needed for the Go stage: this module has no third-party
+dependencies, so there is no `GOPROXY` to point anywhere.
+
+**Installing the toolchain itself** — for `make build` on the host, outside
+Docker — is a separate problem with separate variables, since rustup fetches
+the compiler rather than any crate:
+
+```bash
+export RUSTUP_DIST_SERVER=https://mirrors.ustc.edu.cn/rust-static
+export RUSTUP_UPDATE_ROOT=https://mirrors.ustc.edu.cn/rust-static/rustup
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+```
+
+The image build needs none of that: `rust:1-bookworm` ships the toolchain
+already.
+
 ## The API image installs nothing
 
 `Dockerfile.api`'s runtime stage is `debian:bookworm-slim` with no `apt-get` in
@@ -284,6 +332,7 @@ this compose file exposes:
 
 | Variable | Default | |
 | --- | --- | --- |
+| `CARGO_REGISTRY_MIRROR` | unset | crates.io source replacement for the Rust build stage; unset means upstream |
 | `DOLICO_REGISTRY` | `reg.memochat.ai` | where images are pulled from; `make image` defaults it to `local` |
 | `DOLICO_TAG` | `latest` | image tag; `make image` defaults it to `dev`. Pin it to a commit SHA on a server |
 | `DOLICO_PORT` | `8080` | host port, bound to `127.0.0.1` |

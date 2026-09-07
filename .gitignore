@@ -20,4 +20,10 @@ __pycache__/
 /data/
 /dev-data/
 
+# Local build and deployment settings: registry mirrors, DOLICO_TAG, ports.
+# Compose reads the one next to its file. These hold host-specific values that
+# would be wrong for anyone else, which is why none of them are committed.
+.env
+/deploy/.env
+
 .DS_Store
