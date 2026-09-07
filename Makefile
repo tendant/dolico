@@ -141,7 +141,16 @@ clean:
 # what has to sit in front of it.
 # ---------------------------------------------------------------------------
 
-COMPOSE := docker compose -f deploy/docker-compose.yml
+# Compose reads a .env sitting next to its own file, which would be
+# deploy/.env. This repo keeps one at the root instead, beside everything else
+# you would edit -- so it has to be named. Only when it exists: naming an env
+# file that is not there is a hard error, and most builds need no .env at all.
+#
+# Not --project-directory, which would also make compose read the root .env but
+# resolves `context: ..` from there as well, pointing the build one directory
+# above the repository.
+ENV_FILE := $(wildcard .env)
+COMPOSE := docker compose $(if $(ENV_FILE),--env-file .env,) -f deploy/docker-compose.yml
 
 # What `make image` names the images it builds.
 #
@@ -168,7 +177,14 @@ export DOLICO_REGISTRY DOLICO_TAG
 # reach the build. Unset here on purpose: no mirror URL is committed, because
 # the right one depends on where you are, and a stale one in the repository is
 # worse than none.
+#
+# Only when it has a value. `export` on an undefined variable still puts an
+# empty one in the environment, and compose gives the environment precedence
+# over --env-file -- so exporting unconditionally would mean a .env whose
+# mirror is silently ignored.
+ifneq ($(CARGO_REGISTRY_MIRROR),)
 export CARGO_REGISTRY_MIRROR
+endif
 
 IMAGE_API := $(DOLICO_REGISTRY)/dolico-api:$(DOLICO_TAG)
 IMAGE_OCR := $(DOLICO_REGISTRY)/dolico-ocr:$(DOLICO_TAG)
