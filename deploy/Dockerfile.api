@@ -2,8 +2,15 @@
 #
 # Two builders because the shim is a separate toolchain, and one small runtime
 # holding both binaries. The Go binary is static (CGO_ENABLED=0); the Rust one
-# links against glibc, which is why the runtime is debian-slim rather than
-# scratch or distroless/static.
+# links against glibc, which is why the runtime is distroless/base rather than
+# distroless/static or scratch.
+#
+# Nothing is installed in the runtime stage. That is not only about image size:
+# an `apt-get update` here means the build fails whenever the base image's
+# keyring is older than the keys the Debian archive is signed with, which is a
+# failure the application had no part in and cannot fix. Everything the runtime
+# needs is either in the distroless base (glibc, CA certificates) or copied out
+# of a builder.
 
 # --- the shim ---------------------------------------------------------------
 FROM rust:1-bookworm AS shim
@@ -20,16 +27,26 @@ COPY go.mod ./
 COPY cmd ./cmd
 COPY internal ./internal
 RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/dolico ./cmd/dolico
+# Made here so it can be copied in with the right owner. The runtime stage has
+# no shell to chown anything with.
+RUN mkdir -p /out/data
 
 # --- runtime ----------------------------------------------------------------
-FROM debian:bookworm-slim
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates curl \
-    && rm -rf /var/lib/apt/lists/* \
-    && useradd --system --create-home --uid 10001 dolico
+# `cc` and not `base` or `static`: the shim is a dynamically linked Rust binary
+# and wants libgcc_s.so.1 as well as glibc, which `base` does not ship. Without
+# it the shim exits 127 the moment the API execs it, and the API refuses to
+# start -- correctly, since it verifies the shim at boot rather than at first
+# upload. `cc` is built on `base`, so the CA certificates come along too: the
+# other half of what the old apt line installed.
+FROM gcr.io/distroless/cc-debian12
 
 COPY --from=server /out/dolico /usr/local/bin/dolico
 COPY --from=shim /src/rust/dolico-rs/target/release/dolico-rs /usr/local/bin/dolico-rs
+# Arrives owned by the user that writes to it, because there is no shell here
+# to fix it afterwards -- and Docker initializes a named volume from whatever
+# is at the mount point, ownership included, so getting this wrong means a
+# root-owned volume the process cannot write to.
+COPY --from=server --chown=10001:10001 /out/data /var/lib/dolico
 
 # Set explicitly rather than relying on the binary's relative search, which
 # looks for the shim next to a repository layout that does not exist here.
@@ -37,13 +54,19 @@ ENV DOLICO_SHIM_PATH=/usr/local/bin/dolico-rs \
     DOLICO_ADDR=:8080 \
     DOLICO_DATA_DIR=/var/lib/dolico
 
-RUN mkdir -p /var/lib/dolico && chown dolico:dolico /var/lib/dolico
-USER dolico
+# Numeric, because distroless has no useradd and needs none: a uid is all the
+# kernel checks. 10001 is load-bearing -- dolico-stack's deployment sets
+# `fsGroup: 10001` to match it.
+USER 10001:10001
 EXPOSE 8080
 
 # Liveness only. This checks the process and that the shim is executable; it
 # says nothing about whether the OCR service is reachable.
+#
+# The binary probes itself, since a distroless image has no curl to do it with
+# and a HEALTHCHECK runs inside the container. Exec form: there is no shell to
+# parse a string one.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-    CMD curl -fsS http://127.0.0.1:8080/healthz || exit 1
+    CMD ["/usr/local/bin/dolico", "healthcheck"]
 
 ENTRYPOINT ["/usr/local/bin/dolico"]

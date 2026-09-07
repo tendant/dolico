@@ -97,6 +97,35 @@ flag alone on amd64, where oneDNN works and is the faster path.
 
 The API image has no such constraint and builds natively for the host.
 
+## The API image has no shell
+
+`Dockerfile.api` builds on `gcr.io/distroless/base-debian12` and installs
+nothing: the Go binary, the Rust shim, and a data directory arriving with the
+right owner. `base` rather than `static` because the shim links glibc.
+
+The reason is not image size. An `apt-get` in a runtime stage means the build
+breaks whenever the base image's keyring is older than the keys the Debian
+archive is signed with — `NO_PUBKEY`, on a line this repository did not write
+and cannot fix. `make image` also passes `--pull` so a stale base cannot sit in
+the local store accumulating that risk.
+
+Two consequences worth knowing:
+
+- **`docker compose exec api sh` does not work.** There is no shell, no
+  `curl`, no `find`. Reach the data through a throwaway container mounted on
+  the volume instead — see *The blob store grows forever*.
+- **The health check is the binary.** `dolico healthcheck` GETs its own
+  `/healthz` and exits 0 or 1, which is what the image's `HEALTHCHECK` runs.
+  Kubernetes ignores all of this: its probes are `httpGet`, performed by the
+  kubelet from outside the container.
+
+The OCR image is still Debian and still installs packages. `libgl1`,
+`libglib2.0-0` and `libgomp1` are opencv's and Paddle's, there is no builder
+stage to copy them out of, and that image is deliberately not multi-stage
+because Paddle's compiled `.so` files have baked-in paths that break when a
+venv moves between stages. So `--pull` matters most for the image that cannot
+be made apt-free.
+
 ## This is not safe to expose. What your gateway must do
 
 **dolico has no authentication, no authorization and no rate limiting.** The
@@ -186,12 +215,19 @@ Until there is a real answer, a cron job on the host is the honest workaround:
 
 ```bash
 # Delete derived documents and blobs untouched for 30 days.
-docker compose -f deploy/docker-compose.yml exec api \
-  find /var/lib/dolico -type f -atime +30 -delete
+docker run --rm -v dolico_dolico-data:/data debian:bookworm-slim \
+  find /data -type f -atime +30 -delete
 ```
+
+A throwaway container against the volume, not `compose exec api`: the API image
+is distroless and has neither a shell nor `find`. `dolico_dolico-data` is the
+volume's real name -- compose prefixes it with the project, which this file
+sets to `dolico`.
 
 Check what that would remove before trusting it, and note that it will happily
 delete a document that is still referenced by a job someone is about to poll.
+`DOLICO_BLOB_TTL` does the same job from inside the process, without a cron
+entry and without a second container that has to know the layout.
 
 ## Upgrading
 

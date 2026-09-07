@@ -166,8 +166,15 @@ export DOLICO_REGISTRY DOLICO_TAG
 IMAGE_API := $(DOLICO_REGISTRY)/dolico-api:$(DOLICO_TAG)
 IMAGE_OCR := $(DOLICO_REGISTRY)/dolico-ocr:$(DOLICO_TAG)
 
+# --pull by default: a base image left in the local store goes stale, and a
+# stale Debian base fails `apt-get update` with NO_PUBKEY once the archive is
+# signed with keys its keyring predates -- a build failure with no cause in
+# this repository and no fix inside it. `make image PULL=` skips the check when
+# you are offline or deliberately pinning what you already have.
+PULL ?= --pull
+
 image:
-	@$(COMPOSE) build
+	@$(COMPOSE) build $(PULL)
 	@echo "built $(IMAGE_API)"
 	@echo "built $(IMAGE_OCR)"
 

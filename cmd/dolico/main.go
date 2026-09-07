@@ -11,7 +11,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -36,10 +38,64 @@ import (
 )
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "healthcheck" {
+		if err := healthcheck(); err != nil {
+			fmt.Fprintln(os.Stderr, "unhealthy:", err)
+			os.Exit(1)
+		}
+		return
+	}
 	if err := run(); err != nil {
 		slog.Error("fatal", "error", err)
 		os.Exit(1)
 	}
+}
+
+// healthcheck probes this process's own /healthz and exits non-zero if it is
+// not serving. It is here because the runtime image is distroless: a Docker
+// HEALTHCHECK runs inside the container, and that image has no curl and no
+// shell to run one with. Kubernetes needs none of it -- its probes are
+// httpGet, performed by the kubelet from outside.
+//
+// Liveness only, exactly like the endpoint it calls: this says the process is
+// up and the shim is executable, and nothing about whether the OCR tier is
+// reachable.
+func healthcheck() error {
+	addr := os.Getenv("DOLICO_ADDR")
+	if addr == "" {
+		addr = ":8080"
+	}
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return fmt.Errorf("DOLICO_ADDR %q: %w", addr, err)
+	}
+	// A listen address says where to accept, not where to dial. ":8080" and
+	// "0.0.0.0:8080" are wildcards with no host to connect to, and this probe
+	// runs inside the container, so loopback is what they mean here.
+	switch host {
+	case "", "0.0.0.0", "::":
+		host = "127.0.0.1"
+	}
+	url := "http://" + net.JoinHostPort(host, port) + "/healthz"
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return err
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	// Drained so the connection can be reused -- immaterial for a process that
+	// is about to exit, and the habit is cheaper than the exception.
+	io.Copy(io.Discard, resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("%s: %s", url, resp.Status)
+	}
+	return nil
 }
 
 func run() error {
