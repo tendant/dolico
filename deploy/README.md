@@ -108,16 +108,16 @@ CARGO_REGISTRY_MIRROR=sparse+https://mirrors.ustc.edu.cn/crates.io-index/ make i
 ```
 
 Or, since a mirror is a property of where you are and not of the build, put it
-in the repository's `.env` so every later `make image` picks it up:
+in `deploy/.env` so every later `make image` picks it up:
 
 ```bash
-# .env at the repository root -- gitignored
+# deploy/.env -- gitignored
 CARGO_REGISTRY_MIRROR=sparse+https://mirrors.ustc.edu.cn/crates.io-index/
 ```
 
-`make` names that file explicitly. Compose on its own reads a `.env` next to
-the compose file, so a server holding only `docker-compose.yml` should put one
-beside it — the default there, and the same variables.
+Compose reads that file on its own, because it sits beside the compose file —
+so it is also where a server holding only `docker-compose.yml` puts its own
+settings, with no flag to remember on either side.
 
 **No mirror URL is committed, and none should be.** The variable is empty by
 default and the Dockerfile then writes no cargo config at all, so an unset
@@ -295,10 +295,9 @@ DOLICO_TAG=<new-sha> docker compose -f docker-compose.yml pull
 DOLICO_TAG=<new-sha> docker compose -f docker-compose.yml up -d --no-build
 ```
 
-Keep `DOLICO_TAG` somewhere the next `up` will read it — an `.env`, beside the
-compose file on a server or at the repository root under `make` — or the
-containers revert to whatever `latest` resolves to the next time someone
-restarts them without the variable set.
+Keep `DOLICO_TAG` somewhere the next `up` will read it — an `.env` beside the
+compose file — or the containers revert to whatever `latest` resolves to the
+next time someone restarts them without the variable set.
 
 Two version numbers change what happens to cached work:
 

@@ -141,16 +141,11 @@ clean:
 # what has to sit in front of it.
 # ---------------------------------------------------------------------------
 
-# Compose reads a .env sitting next to its own file, which would be
-# deploy/.env. This repo keeps one at the root instead, beside everything else
-# you would edit -- so it has to be named. Only when it exists: naming an env
-# file that is not there is a hard error, and most builds need no .env at all.
-#
-# Not --project-directory, which would also make compose read the root .env but
-# resolves `context: ..` from there as well, pointing the build one directory
-# above the repository.
-ENV_FILE := $(wildcard .env)
-COMPOSE := docker compose $(if $(ENV_FILE),--env-file .env,) -f deploy/docker-compose.yml
+# Local settings -- a crates.io mirror, DOLICO_TAG, a port -- go in deploy/.env,
+# which compose reads on its own because it sits beside the compose file. No
+# --env-file here: the default is the same file a server would use, so one
+# arrangement covers both.
+COMPOSE := docker compose -f deploy/docker-compose.yml
 
 # What `make image` names the images it builds.
 #

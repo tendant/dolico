@@ -21,8 +21,9 @@ __pycache__/
 /dev-data/
 
 # Local build and deployment settings: registry mirrors, DOLICO_TAG, ports.
-# Host-specific values that would be wrong for anyone else, which is why none
-# of them are committed. Unanchored, so it covers a .env left in any directory.
+# deploy/.env is the one compose reads; the pattern is unanchored so a .env
+# left anywhere else is covered too. Host-specific values that would be wrong
+# for anyone else, which is why none of them are committed.
 .env
 
 .DS_Store
