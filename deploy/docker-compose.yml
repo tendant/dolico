@@ -26,6 +26,12 @@ services:
     build:
       context: ..
       dockerfile: deploy/Dockerfile.ocr
+      args:
+        # Empty unless set in the environment or deploy/.env. Nothing is
+        # committed with a value -- see deploy/README.md, "Building behind a
+        # slow index".
+        PYPI_FILES_MIRROR: ${PYPI_FILES_MIRROR:-}
+        PIP_INDEX_URL: ${PIP_INDEX_URL:-}
     # PaddlePaddle publishes no Linux aarch64 wheels -- only manylinux x86_64,
     # macOS arm64 and Windows. So this image is amd64 whatever the host is.
     # On an Apple Silicon machine that means emulation, and Paddle is CPU-bound

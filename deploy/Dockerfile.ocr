@@ -38,11 +38,36 @@ WORKDIR /app
 # Dependencies first, so that editing the service does not reinstall Paddle.
 ARG OCR_EXTRAS="structure"
 
+# Optional PyPI mirrors, for networks where upstream is slow or blocked. Both
+# are empty by default and no value is committed -- see deploy/README.md.
+#
+# Two of them, because `uv sync --frozen` does not consult an index at all: the
+# lock pins an absolute files.pythonhosted.org URL for every wheel, and uv
+# downloads exactly those. An index-url alone changes nothing here, which is
+# worth knowing before setting one and concluding the mirror is not working.
+#
+#   PYPI_FILES_MIRROR  rewrites that host in the lock. The mirrors serve the
+#                      same /packages/... paths, so versions are unchanged and
+#                      uv still checks every sha256 the lock records -- a mirror
+#                      serving different bytes fails the build rather than
+#                      quietly changing the image.
+#   PIP_INDEX_URL      the index proper. Unused while --frozen holds; it is
+#                      here for pip, and for a build that re-resolves.
+ARG PYPI_FILES_MIRROR=
+ARG PIP_INDEX_URL=
+
 COPY python/ocr-service/pyproject.toml python/ocr-service/uv.lock ./
-RUN uv sync --frozen $(for e in $OCR_EXTRAS; do echo --extra $e; done) --no-install-project
+RUN if [ -n "$PYPI_FILES_MIRROR" ]; then \
+        sed -i "s|https://files\.pythonhosted\.org|$PYPI_FILES_MIRROR|g" uv.lock \
+        && echo "uv.lock: wheel downloads redirected to $PYPI_FILES_MIRROR"; \
+    fi
+
+RUN ${PIP_INDEX_URL:+env UV_DEFAULT_INDEX="$PIP_INDEX_URL" PIP_INDEX_URL="$PIP_INDEX_URL"} \
+    uv sync --frozen $(for e in $OCR_EXTRAS; do echo --extra $e; done) --no-install-project
 
 COPY python/ocr-service/dolico_ocr ./dolico_ocr
-RUN uv sync --frozen $(for e in $OCR_EXTRAS; do echo --extra $e; done) \
+RUN ${PIP_INDEX_URL:+env UV_DEFAULT_INDEX="$PIP_INDEX_URL" PIP_INDEX_URL="$PIP_INDEX_URL"} \
+    uv sync --frozen $(for e in $OCR_EXTRAS; do echo --extra $e; done) \
     && chown -R dolico:dolico /app \
     # Create the model cache in the image, owned by the user that will write to
     # it. Docker initializes an empty named volume from whatever is at the

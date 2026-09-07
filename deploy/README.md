@@ -113,11 +113,42 @@ in `deploy/.env` so every later `make image` picks it up:
 ```bash
 # deploy/.env -- gitignored
 CARGO_REGISTRY_MIRROR=sparse+https://mirrors.ustc.edu.cn/crates.io-index/
+PYPI_FILES_MIRROR=https://pypi.tuna.tsinghua.edu.cn
+PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple
 ```
 
 Compose reads that file on its own, because it sits beside the compose file —
 so it is also where a server holding only `docker-compose.yml` puts its own
 settings, with no flag to remember on either side.
+
+### The Python side needs two variables, and `index-url` is the wrong one
+
+The OCR image is where a mirror actually pays: `uv sync` pulls PaddlePaddle and
+its dependencies, which is most of a 4.2GB image. But setting only an index URL
+there does nothing at all, silently.
+
+`uv sync --frozen` never consults an index. `uv.lock` pins an absolute
+`https://files.pythonhosted.org/...` URL for every one of its 1272 wheels and
+sdists, and uv downloads exactly those. Point `PIP_INDEX_URL` at Tsinghua,
+block `files.pythonhosted.org`, and the build still fails on a connection to
+PyPI — which is the whole mechanism in one sentence.
+
+`PYPI_FILES_MIRROR` is the one that works. It rewrites that host in the lock
+before uv reads it:
+
+```bash
+PYPI_FILES_MIRROR=https://pypi.tuna.tsinghua.edu.cn make image
+```
+
+The mirrors serve the same `/packages/...` paths — Tsinghua and USTC both do —
+so **nothing about the resolution changes**: same versions, same files, and uv
+still verifies every sha256 the lock records. A mirror serving different bytes
+fails the build rather than quietly changing the image. That is the same
+guarantee `--locked` gives the Rust stage, by the same means.
+
+`PIP_INDEX_URL` is still accepted and still worth setting. It reaches `pip` and
+any uv invocation that re-resolves rather than installing from the lock; it is
+simply not what makes this build faster today.
 
 **No mirror URL is committed, and none should be.** The variable is empty by
 default and the Dockerfile then writes no cargo config at all, so an unset
@@ -337,6 +368,8 @@ this compose file exposes:
 | Variable | Default | |
 | --- | --- | --- |
 | `CARGO_REGISTRY_MIRROR` | unset | crates.io source replacement for the Rust build stage; unset means upstream |
+| `PYPI_FILES_MIRROR` | unset | host to rewrite `files.pythonhosted.org` to in `uv.lock`; the one that speeds up the OCR build |
+| `PIP_INDEX_URL` | unset | PyPI index for pip and for re-resolving; not consulted by `uv sync --frozen` |
 | `DOLICO_REGISTRY` | `reg.memochat.ai` | where images are pulled from; `make image` defaults it to `local` |
 | `DOLICO_TAG` | `latest` | image tag; `make image` defaults it to `dev`. Pin it to a commit SHA on a server |
 | `DOLICO_PORT` | `8080` | host port, bound to `127.0.0.1` |
