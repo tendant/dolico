@@ -97,29 +97,33 @@ flag alone on amd64, where oneDNN works and is the faster path.
 
 The API image has no such constraint and builds natively for the host.
 
-## The API image has no shell
+## The API image installs nothing
 
-`Dockerfile.api` builds on `gcr.io/distroless/base-debian12` and installs
-nothing: the Go binary, the Rust shim, and a data directory arriving with the
-right owner. `base` rather than `static` because the shim links glibc.
+`Dockerfile.api`'s runtime stage is `debian:bookworm-slim` with no `apt-get` in
+it at all: the Go binary, the Rust shim, a data directory arriving already owned
+by uid 10001, and the CA bundle copied out of the Go builder rather than
+installed from the archive.
 
 The reason is not image size. An `apt-get` in a runtime stage means the build
 breaks whenever the base image's keyring is older than the keys the Debian
 archive is signed with — `NO_PUBKEY`, on a line this repository did not write
-and cannot fix. `make image` also passes `--pull` so a stale base cannot sit in
-the local store accumulating that risk.
+and cannot fix. `make image` also passes `--pull`, so a base left in the local
+store cannot go stale into that failure.
 
-Two consequences worth knowing:
+Two things follow from it:
 
-- **`docker compose exec api sh` does not work.** There is no shell, no
-  `curl`, no `find`. Reach the data through a throwaway container mounted on
-  the volume instead — see *The blob store grows forever*.
-- **The health check is the binary.** `dolico healthcheck` GETs its own
-  `/healthz` and exits 0 or 1, which is what the image's `HEALTHCHECK` runs.
-  Kubernetes ignores all of this: its probes are `httpGet`, performed by the
-  kubelet from outside the container.
+- **There is no `curl` in the image**, so the health check is the binary:
+  `dolico healthcheck` GETs its own `/healthz` and exits 0 or 1, which is what
+  `HEALTHCHECK` runs. Kubernetes ignores all of this — its probes are
+  `httpGet`, performed by the kubelet from outside the container.
+- **A shell and `find` are still there**, because debian-slim ships them and
+  removing them would buy nothing. `docker compose exec api sh` works.
 
-The OCR image is still Debian and still installs packages. `libgl1`,
+Distroless would be a better fit and is not used: `gcr.io` is not reachable
+from every network this gets built on. Every image referenced by either
+Dockerfile is on Docker Hub, deliberately.
+
+The OCR image goes further and does install packages. `libgl1`,
 `libglib2.0-0` and `libgomp1` are opencv's and Paddle's, there is no builder
 stage to copy them out of, and that image is deliberately not multi-stage
 because Paddle's compiled `.so` files have baked-in paths that break when a
@@ -215,14 +219,9 @@ Until there is a real answer, a cron job on the host is the honest workaround:
 
 ```bash
 # Delete derived documents and blobs untouched for 30 days.
-docker run --rm -v dolico_dolico-data:/data debian:bookworm-slim \
-  find /data -type f -atime +30 -delete
+docker compose -f deploy/docker-compose.yml exec api \
+  find /var/lib/dolico -type f -atime +30 -delete
 ```
-
-A throwaway container against the volume, not `compose exec api`: the API image
-is distroless and has neither a shell nor `find`. `dolico_dolico-data` is the
-volume's real name -- compose prefixes it with the project, which this file
-sets to `dolico`.
 
 Check what that would remove before trusting it, and note that it will happily
 delete a document that is still referenced by a job someone is about to poll.
