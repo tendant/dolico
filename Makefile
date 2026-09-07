@@ -55,6 +55,7 @@ help:
 	@echo ""
 	@echo "Deployment (two containers, loopback only -- see deploy/README.md):"
 	@echo "  image       Build both images as $(REGISTRY_PREFIX)dolico-{api,ocr}:$(DOLICO_TAG)"
+	@echo "              (the tag is the current commit unless DOLICO_TAG says otherwise)"
 	@echo "  up          Start them; first run downloads OCR models"
 	@echo "  logs        Follow both services"
 	@echo "  verify      Run the e2e sweep against the running deployment"
@@ -179,7 +180,26 @@ dotenv = $(shell sed -n 's/^$(1)=//p' deploy/.env 2>/dev/null | head -1 | tr -d 
 # of a registry it did not come from. Set DOLICO_REGISTRY when you mean to push
 # or pull.
 DOLICO_REGISTRY ?= $(call dotenv,DOLICO_REGISTRY)
-DOLICO_TAG ?= $(or $(call dotenv,DOLICO_TAG),dev)
+
+# The tag defaults to the commit being built. It is the only thing that ties an
+# image back to the source it came from, it is what makes a push reproducible,
+# and it is the same 7 characters CI tags with, so an image built here and one
+# built there have the same name for the same code.
+#
+# A working tree with changes in it gets `-dirty`. The commit alone would name
+# something that was never built, and a registry is exactly where that stops
+# being recoverable -- nobody can check out `39d18d6` and get the image they
+# pulled. Untracked files count: they are as capable of ending up in the build
+# context as modified ones.
+#
+# Outside a git checkout -- a tarball, a vendored copy -- it falls back to
+# `dev`, which claims nothing.
+GIT_SHA := $(shell git rev-parse --short=7 HEAD 2>/dev/null)
+ifneq ($(GIT_SHA),)
+GIT_TAG := $(GIT_SHA)$(shell test -z "$$(git status --porcelain 2>/dev/null)" || echo -dirty)
+endif
+
+DOLICO_TAG ?= $(or $(call dotenv,DOLICO_TAG),$(GIT_TAG),dev)
 export DOLICO_REGISTRY DOLICO_TAG
 
 # Optional build-time mirrors, exported so that both
@@ -280,7 +300,6 @@ push: compose-check
 		echo "their names and nowhere to go. Set it in deploy/.env:"; \
 		echo; \
 		echo "  DOLICO_REGISTRY=reg.memochat.ai"; \
-		echo "  DOLICO_TAG=$$(git rev-parse --short=7 HEAD 2>/dev/null || echo '<commit>')"; \
 		exit 1; \
 	fi
 	@$(COMPOSE) push

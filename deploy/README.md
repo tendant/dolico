@@ -4,21 +4,30 @@ Two containers on one host: the API server and the OCR tier. The vision tier is
 not included — see *Turning on the vision tier* below.
 
 ```bash
-make image      # dolico-api:dev, dolico-ocr:dev
+make image      # dolico-api:<commit>, dolico-ocr:<commit>
 make up
 curl -F file=@testdata/mixed.pdf 'http://127.0.0.1:8080/v1/documents?wait=true'
 ```
 
-`make image` names what it builds `dolico-api:dev` and `dolico-ocr:dev`, with
-no registry prefix at all — an image built here and never pushed has no
-business carrying the name of a registry it did not come from. Set
-`DOLICO_REGISTRY` when you do mean to push or pull, and the same names gain the
-prefix:
+`make image` names what it builds `dolico-api:<commit>`, with no registry
+prefix at all — an image built here and never pushed has no business carrying
+the name of a registry it did not come from. Set `DOLICO_REGISTRY` when you do
+mean to push or pull, and the same names gain the prefix:
 
 ```bash
-DOLICO_REGISTRY=reg.memochat.ai DOLICO_TAG=$(git rev-parse --short=7 HEAD) \
-  make image        # reg.memochat.ai/dolico-api:<sha>
+DOLICO_REGISTRY=reg.memochat.ai make image   # reg.memochat.ai/dolico-api:39d18d6
 ```
+
+**The tag is the commit, and you do not set it.** It is the same seven
+characters CI tags with, so an image built here and one built there have the
+same name for the same code, and anything pulled from a registry can be checked
+out. A working tree with changes in it — untracked files included, since those
+reach a build context just as readily — tags `<commit>-dirty` instead, because
+the commit alone would name something that was never built. Outside a git
+checkout it falls back to `dev`, which claims nothing.
+
+`DOLICO_TAG` still overrides it, from the environment or `deploy/.env`, for the
+times you mean something other than "this commit".
 
 No registry is written into the compose file. This repository is public, so one
 hardcoded there would be wrong for most people reading it and a standing
@@ -65,8 +74,8 @@ bare name, finds none, and — because the service has a build section — tries
 build it, which is what `--no-build` is there to turn into an error.
 
 **Pin `DOLICO_TAG`.** The compose file defaults it to `latest` so that a bare
-`docker compose` invocation resolves to something at all — `make` sets `dev`
-and never touches it. A server left on `latest` with `restart: unless-stopped`
+`docker compose` invocation resolves to something at all — `make` sets the
+current commit and never consults that default. A server left on `latest` with `restart: unless-stopped`
 picks up a different version on its next reboot, which is a version change
 nobody performed and nobody logged.
 
@@ -85,10 +94,12 @@ construction rather than by remembering to pass the same two variables twice:
 ```bash
 # deploy/.env -- gitignored
 DOLICO_REGISTRY=reg.memochat.ai
-DOLICO_TAG=39d18d6
 DOLICO_REGISTRY_USER=tendant
 DOLICO_REGISTRY_PASSWORD=...
 ```
+
+No `DOLICO_TAG` here: it defaults to the commit being built, which is what you
+want a pushed image tagged with anyway.
 
 ```bash
 make login    # only when the host is not logged in already
@@ -449,7 +460,7 @@ this compose file exposes:
 | `PIP_INDEX_URL` | unset | PyPI index for pip and for re-resolving; not consulted by `uv sync --frozen` |
 | `DEBIAN_MIRROR` | unset | replaces `deb.debian.org` in the OCR image's apt sources |
 | `DOLICO_REGISTRY` | unset | registry prefix on the image names; unset means a bare `dolico-api:tag`, built and never pushed |
-| `DOLICO_TAG` | `latest` | image tag; `make image` defaults it to `dev`. Pin it to a commit SHA on a server |
+| `DOLICO_TAG` | `latest` | image tag; under `make` it defaults to the current commit (`-dirty` if the tree is). Pin it on a server |
 | `DOLICO_REGISTRY_USER` | unset | registry username, for `make login` |
 | `DOLICO_REGISTRY_PASSWORD` | unset | registry password; unset means `make login` prompts |
 | `DOLICO_PORT` | `8080` | host port, bound to `127.0.0.1` |
