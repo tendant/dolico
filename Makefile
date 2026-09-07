@@ -236,6 +236,19 @@ IMAGE_OCR := $(REGISTRY_PREFIX)dolico-ocr:$(DOLICO_TAG)
 # you are offline or deliberately pinning what you already have.
 PULL ?= --pull
 
+# BuildKit attaches a provenance attestation to every build by default, and an
+# attestation is a second manifest -- so what would have been one image becomes
+# an OCI index holding the image and its attestation. Registries that speak
+# only Docker's schema 2 reject that index with
+#
+#   error from registry: manifest invalid
+#
+# after uploading every layer, which is a slow way to be told the bytes were
+# fine and the description of them was not. Unset this to get attestations back
+# on a registry that understands them; `docker compose build` has no flag for
+# it, so it is the environment or nothing.
+export BUILDX_NO_DEFAULT_ATTESTATIONS ?= 1
+
 # One at a time, not the parallel build compose does by default. The api stage
 # is a full Rust release compile that will take every core it is given, and the
 # ocr stage unpacks several gigabytes of PaddlePaddle wheels; run together on a
