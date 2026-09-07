@@ -103,13 +103,26 @@ want a pushed image tagged with anyway.
 
 ```bash
 make login    # only when the host is not logged in already
-make image
-make push
+make push     # builds first, then pushes
 ```
 
-`make push` refuses while `DOLICO_REGISTRY` is unset, since the images then
-carry no registry in their names and have nowhere to go — a failure worth
-getting here rather than deep inside docker.
+**`push` builds, and that is the point rather than a convenience.** The
+registry is part of the image name, so anything built before `DOLICO_REGISTRY`
+was set is tagged without it, and a later push asks for a name nothing ever
+produced:
+
+```
+✘ reg.example.com/dolico-api:f7cbc42  tag does not exist
+```
+
+Depending on the build makes the two agree by construction. When nothing has
+changed it is a cache hit and a re-tag; `make push PULL=` skips the base-image
+check as well, if you would rather push the bytes you last tested than rebuild
+on whatever the bases are today.
+
+`make push` refuses while `DOLICO_REGISTRY` is unset — before building
+anything, since the images would carry no registry in their names and have
+nowhere to go.
 
 **The password is optional and does not have to be there at all.** With no
 `DOLICO_REGISTRY_PASSWORD`, `make login` runs an ordinary interactive

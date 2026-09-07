@@ -1,7 +1,7 @@
 .PHONY: help build build-go build-rust run run-ocr run-vision ocr ocr-text ocr-vision \
         test test-go test-rust test-ocr lint fmt e2e e2e-ocr e2e-vision bench bench-ocr \
         bench-vision bench-hard testdata clean clean-ocr \
-        image up down logs config verify compose-check push login
+        image up down logs config verify compose-check push login registry-check
 
 # Caches live inside the repo so a build never depends on, or pollutes, the
 # machine's shared Go cache.
@@ -262,6 +262,16 @@ compose-check:
 		echo "which the standalone docker-compose v1 does not support."; \
 		exit 1; }
 
+.PHONY: registry-check
+registry-check:
+	@if [ -z "$(DOLICO_REGISTRY)" ]; then \
+		echo "DOLICO_REGISTRY is not set, so these images have no registry in"; \
+		echo "their names and nowhere to go. Set it in deploy/.env:"; \
+		echo; \
+		echo "  DOLICO_REGISTRY=reg.example.com"; \
+		exit 1; \
+	fi
+
 image: compose-check
 	@$(COMPOSE) build $(PULL) api
 	@$(COMPOSE) build $(PULL) ocr
@@ -291,23 +301,22 @@ verify:
 config: compose-check
 	@$(COMPOSE) config
 
-# Push what `make image` built. The registry and tag come from deploy/.env like
-# everything else, so building and pushing agree by construction rather than by
-# remembering to pass the same two variables twice.
-push: compose-check
-	@if [ -z "$(DOLICO_REGISTRY)" ]; then \
-		echo "DOLICO_REGISTRY is not set, so these images have no registry in"; \
-		echo "their names and nowhere to go. Set it in deploy/.env:"; \
-		echo; \
-		echo "  DOLICO_REGISTRY=reg.memochat.ai"; \
-		exit 1; \
-	fi
+# `push` builds first, and that is the whole point rather than a convenience.
+# The image name carries the registry, so images built before DOLICO_REGISTRY
+# was set are tagged without it and a later push looks for a name nothing ever
+# produced -- compose reports `tag does not exist`, naming the image it wanted
+# rather than the one sitting there. Depending on `image` makes the two agree by
+# construction; when nothing has changed it is a cache hit and a re-tag.
+#
+# `make push PULL=` skips the base-image check if you want the bytes you last
+# tested rather than a rebuild on whatever the bases are today.
+push: registry-check image
 	@$(COMPOSE) push
 	@echo "pushed $(IMAGE_API)"
 	@echo "pushed $(IMAGE_OCR)"
 
 # Credentials never pass through make -- see the script.
-login:
+login: registry-check
 	@./scripts/registry-login
 
 # ---------------------------------------------------------------------------
