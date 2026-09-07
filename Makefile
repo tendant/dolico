@@ -1,7 +1,8 @@
 .PHONY: help build build-go build-rust run run-ocr run-vision ocr ocr-text ocr-vision \
         test test-go test-rust test-ocr lint fmt e2e e2e-ocr e2e-vision bench bench-ocr \
         bench-vision bench-hard testdata clean clean-ocr \
-        deploy-build deploy-up deploy-down deploy-logs deploy-config deploy-verify
+        deploy-build deploy-up deploy-down deploy-logs deploy-config deploy-verify \
+        deploy-images
 
 # Caches live inside the repo so a build never depends on, or pollutes, the
 # machine's shared Go cache.
@@ -54,7 +55,8 @@ help:
 	@echo "  bench-hard   Score the real-scan corpus in testdata/corpus-hard"
 	@echo ""
 	@echo "Deployment (two containers, loopback only -- see deploy/README.md):"
-	@echo "  deploy-build Build the API and OCR images"
+	@echo "  deploy-build Build both images locally as $(DOLICO_REGISTRY)/dolico-{api,ocr}:$(DOLICO_TAG)"
+	@echo "  deploy-images Show what the last build produced"
 	@echo "  deploy-up    Start them; first run downloads OCR models"
 	@echo "  deploy-logs  Follow both services"
 	@echo "  deploy-verify Run the e2e sweep against the running deployment"
@@ -143,12 +145,37 @@ clean:
 
 COMPOSE := docker compose -f deploy/docker-compose.yml
 
+# What `make deploy-*` names the images it builds.
+#
+# The compose file defaults these to reg.memochat.ai, so that a server holding
+# nothing but that file can pull. A build host is the other case: it is
+# producing an image for itself, and stamping a registry it will never push to
+# onto a local build makes `docker images` read like a lie. So the Makefile --
+# the developer's entry point -- names them for this machine instead.
+#
+# Both are `?=` and make lets the environment win, so the registry naming is
+# one variable away:
+#
+#   DOLICO_REGISTRY=reg.memochat.ai DOLICO_TAG=$(git rev-parse --short=7 HEAD) \
+#     make deploy-build
+#
+# Nothing here pushes. `docker push` is the only command that contacts a
+# registry and no target runs it -- CI does, from dolico-stack/ci/pipeline.hcl.
+DOLICO_REGISTRY ?= local
+DOLICO_TAG ?= dev
+export DOLICO_REGISTRY DOLICO_TAG
+
+IMAGE_API := $(DOLICO_REGISTRY)/dolico-api:$(DOLICO_TAG)
+IMAGE_OCR := $(DOLICO_REGISTRY)/dolico-ocr:$(DOLICO_TAG)
+
 deploy-build:
 	@$(COMPOSE) build
+	@echo "built $(IMAGE_API)"
+	@echo "built $(IMAGE_OCR)"
 
 deploy-up:
 	@$(COMPOSE) up -d
-	@echo "API on 127.0.0.1:$${DOLICO_PORT:-8080} (loopback only)."
+	@echo "API on 127.0.0.1:$${DOLICO_PORT:-8080} (loopback only), from $(IMAGE_API)."
 	@echo "First start downloads OCR models and is unhealthy meanwhile:"
 	@echo "  make deploy-logs"
 
@@ -168,6 +195,10 @@ deploy-verify:
 
 deploy-config:
 	@$(COMPOSE) config
+
+deploy-images:
+	@docker images --filter=reference='$(IMAGE_API)' --filter=reference='$(IMAGE_OCR)' \
+		--format 'table {{.Repository}}:{{.Tag}}\t{{.Size}}\t{{.CreatedSince}}'
 
 # ---------------------------------------------------------------------------
 # OCR tier

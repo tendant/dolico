@@ -4,8 +4,27 @@ Two containers on one host: the API server and the OCR tier. The vision tier is
 not included — see *Turning on the vision tier* below.
 
 ```bash
-docker compose -f deploy/docker-compose.yml up -d --build
+make deploy-build           # local/dolico-api:dev, local/dolico-ocr:dev
+make deploy-up
 curl -F file=@testdata/mixed.pdf 'http://127.0.0.1:8080/v1/documents?wait=true'
+```
+
+`make deploy-*` names what it builds `local/dolico-{api,ocr}:dev`, because a
+build host is producing images for itself and a registry name on something
+that will never be pushed reads like a lie in `docker images`. Override with
+`DOLICO_REGISTRY` and `DOLICO_TAG` when you do mean to push:
+
+```bash
+DOLICO_REGISTRY=reg.memochat.ai DOLICO_TAG=$(git rev-parse --short=7 HEAD) \
+  make deploy-build
+```
+
+No target here pushes; `docker push` is the only command that talks to a
+registry, and CI is what runs it. Calling compose directly still works, and
+defaults to the registry name rather than the local one:
+
+```bash
+docker compose -f deploy/docker-compose.yml up -d --build
 ```
 
 The first start is slow and *reports itself unhealthy while it is*: PaddleOCR
@@ -229,8 +248,8 @@ this compose file exposes:
 
 | Variable | Default | |
 | --- | --- | --- |
-| `DOLICO_REGISTRY` | `reg.memochat.ai` | where the images are pulled from |
-| `DOLICO_TAG` | `latest` | image tag; pin it to a commit SHA on a server |
+| `DOLICO_REGISTRY` | `reg.memochat.ai` | where images are pulled from; `make deploy-*` defaults it to `local` |
+| `DOLICO_TAG` | `latest` | image tag; `make deploy-*` defaults it to `dev`. Pin it to a commit SHA on a server |
 | `DOLICO_PORT` | `8080` | host port, bound to `127.0.0.1` |
 | `DOLICO_OCR_WORKERS` | `2` | OCR processes; also the client's concurrency |
 | `OCR_MEM_LIMIT` | `8g` | keep at roughly `workers × 3GB` + headroom |
