@@ -103,26 +103,28 @@ want a pushed image tagged with anyway.
 
 ```bash
 make login    # only when the host is not logged in already
-make push     # builds first, then pushes
+make image
+make push
 ```
 
-**`push` builds, and that is the point rather than a convenience.** The
-registry is part of the image name, so anything built before `DOLICO_REGISTRY`
-was set is tagged without it, and a later push asks for a name nothing ever
-produced:
+**`push` does not build.** It sends the images that are already there, so what
+reaches the registry is what you tested — a push that built could pick up a
+base image that moved under `--pull`, or a file edited since.
+
+It does check they exist first, because compose's own failure is misleading:
 
 ```
-✘ reg.example.com/dolico-api:f7cbc42  tag does not exist
+✘ reg.example.com/dolico-ocr:f7cbc42  tag does not exist: reg.example.com/dolico-api:f7cbc42
 ```
 
-Depending on the build makes the two agree by construction. When nothing has
-changed it is a cache hit and a re-tag; `make push PULL=` skips the base-image
-check as well, if you would rather push the bytes you last tested than rebuild
-on whatever the bases are today.
+Two rows, one error message rendered against both — nothing was pushed under
+another image's name. `make push` says which names are missing instead, and if
+an unprefixed `dolico-api:<commit>` is sitting there it says that too, since
+building before `DOLICO_REGISTRY` was set is how you get there. `make image`
+re-tags in a cache hit.
 
-`make push` refuses while `DOLICO_REGISTRY` is unset — before building
-anything, since the images would carry no registry in their names and have
-nowhere to go.
+`make push` refuses while `DOLICO_REGISTRY` is unset, since the images would
+carry no registry in their names and have nowhere to go.
 
 **The password is optional and does not have to be there at all.** With no
 `DOLICO_REGISTRY_PASSWORD`, `make login` runs an ordinary interactive

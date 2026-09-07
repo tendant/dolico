@@ -301,16 +301,32 @@ verify:
 config: compose-check
 	@$(COMPOSE) config
 
-# `push` builds first, and that is the whole point rather than a convenience.
-# The image name carries the registry, so images built before DOLICO_REGISTRY
-# was set are tagged without it and a later push looks for a name nothing ever
-# produced -- compose reports `tag does not exist`, naming the image it wanted
-# rather than the one sitting there. Depending on `image` makes the two agree by
-# construction; when nothing has changed it is a cache hit and a re-tag.
+# Pushes what is already built, and nothing else. A push that builds is a push
+# that can change what it is sending -- a base image moved under `--pull`, a
+# file edited since the build -- and the whole value of pushing a tagged image
+# is that it is the one you tested.
 #
-# `make push PULL=` skips the base-image check if you want the bytes you last
-# tested rather than a rebuild on whatever the bases are today.
-push: registry-check image
+# It does check first, because compose's own failure is misleading here: it
+# reports `tag does not exist` naming the image it wanted, which reads like the
+# build broke rather than like the name it looked for was never produced.
+push: registry-check compose-check
+	@missing=""; \
+	for img in $(IMAGE_API) $(IMAGE_OCR); do \
+		docker image inspect "$$img" >/dev/null 2>&1 || missing="$$missing $$img"; \
+	done; \
+	if [ -n "$$missing" ]; then \
+		echo "not built:$$missing"; \
+		if docker image inspect dolico-api:$(DOLICO_TAG) >/dev/null 2>&1; then \
+			echo; \
+			echo "dolico-api:$(DOLICO_TAG) does exist without the registry prefix,"; \
+			echo "so it was built before DOLICO_REGISTRY was set. The registry is"; \
+			echo "part of the image name, so that is a different image to docker."; \
+		fi; \
+		echo; \
+		echo "Build them under this name first:"; \
+		echo "  make image"; \
+		exit 1; \
+	fi
 	@$(COMPOSE) push
 	@echo "pushed $(IMAGE_API)"
 	@echo "pushed $(IMAGE_OCR)"
