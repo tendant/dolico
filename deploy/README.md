@@ -160,18 +160,45 @@ several times slower than the `make ocr` you develop against** — that path use
 the native macOS arm64 wheel. Measured here: ~7s for a page that takes ~2.5s
 natively. Emulated, it works; it is not a performance measurement.
 
-**On Apple Silicon you also have to turn oneDNN off:**
+## oneDNN is not only an Apple Silicon problem
+
+**Turn oneDNN off unless you have measured that your host does not need it:**
 
 ```bash
 DOLICO_PADDLE_MKLDNN=False docker compose -f deploy/docker-compose.yml up -d
 ```
 
-Paddle's oneDNN backend is x86 code. Emulated, inference dies inside the model
-runner with `ConvertPirAttribute2RuntimeAttribute not support`, which reaches
-the API as a bare `500` from `/v1/extract` and says nothing about the cause. The
-API handles it correctly — the page comes back with `ocr_failed` in its reasons
-and the error in `trace.engines` — but every scanned page is empty. Leave the
-flag alone on amd64, where oneDNN works and is the faster path.
+Inference dies inside the model runner with
+`ConvertPirAttribute2RuntimeAttribute not support`, which reaches the API as a
+bare `500` from `/v1/extract` and says nothing about the cause. The API handles
+it correctly — the page comes back with `ocr_failed` in its reasons and the
+error in `trace.engines` — but **every scanned page is empty while the service
+looks healthy**: `/healthz` stays green and `/v1/engines` still lists
+`pp-structurev3`. Nothing short of running a document through it says otherwise,
+which is what `make verify` is for.
+
+This was documented here as an emulation artifact — something that happened on
+an arm64 machine running the amd64 image — with the advice to leave the flag
+alone on a real server. That advice is wrong, and following it is how a
+deployment ends up serving empty pages while every health signal says it is
+working. Measured on a native x86_64 host (Xeon E5-2620 v4, AVX2 without
+AVX512, under VMware, paddle 3.3.1), driving `StructureEngine` directly inside
+the container:
+
+| `DOLICO_PADDLE_MKLDNN` | thread | result |
+| --- | --- | --- |
+| `False` | main | 4 blocks read |
+| `False` | worker | 4 blocks read |
+| `True` | main | `NotImplementedError: ConvertPirAttribute2RuntimeAttribute` |
+| `True` | worker | `NotImplementedError: ConvertPirAttribute2RuntimeAttribute` |
+
+`paddle.utils.run_check()` passes on that host, so it is neither a broken
+install nor an unsupported CPU. The failure is in PIR's oneDNN instruction path
+(`.../new_executor/instruction/onednn/onednn_instruction.cc:116`), which
+emulation reaches for its own reasons and native amd64 reaches directly.
+
+oneDNN remains the faster path where it works. The point is that "amd64" is not
+evidence that it works — a document through `make verify` is.
 
 The API image has no such constraint and builds natively for the host.
 

@@ -53,12 +53,18 @@ services:
       # comes from processes. Each costs ~3GB once warm -- keep this and
       # mem_limit in step.
       DOLICO_OCR_WORKERS: ${DOLICO_OCR_WORKERS:-2}
-      # Paddle's oneDNN backend is x86 code. Emulated on Apple Silicon it dies
-      # inside inference with "ConvertPirAttribute2RuntimeAttribute not
-      # support", which arrives as a 500 from /v1/extract and tells you nothing
-      # about the cause. Set DOLICO_PADDLE_MKLDNN=False to develop against this
-      # stack on an arm64 machine; leave it alone on an amd64 server, where
-      # oneDNN works and is the faster path.
+      # Paddle's oneDNN backend. It dies inside inference with
+      # "ConvertPirAttribute2RuntimeAttribute not support", which arrives as a
+      # 500 from /v1/extract and tells you nothing about the cause -- and this
+      # is not only an arm64/emulation problem, as this file used to say. It
+      # reproduces on native x86_64 with paddle 3.3.1; see deploy/README.md,
+      # "oneDNN is not only an Apple Silicon problem", for the measurements.
+      #
+      # Left defaulting to True because it is the faster path where it works
+      # and turning it off for everyone would cost throughput on hosts that are
+      # fine. Set DOLICO_PADDLE_MKLDNN=False the moment `make verify` shows
+      # scanned pages coming back empty -- which is the only symptom, since the
+      # service stays healthy throughout.
       PADDLE_PDX_ENABLE_MKLDNN_BYDEFAULT: ${DOLICO_PADDLE_MKLDNN:-True}
     volumes:
       # Models are downloaded on first start. Without this volume every
