@@ -25,6 +25,21 @@ FROM python:3.12-slim
 # here only because the tag list could not be checked when this was written.
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /usr/local/bin/
 
+# An optional Debian mirror, for networks where deb.debian.org is slow enough
+# to stall the build for half an hour. Empty by default; no value is committed.
+#
+#   DEBIAN_MIRROR=https://mirrors.tuna.tsinghua.edu.cn make image
+#
+# One substitution covers both suites, because the mirrors lay them out exactly
+# as the archive does: /debian and /debian-security under the same host. The
+# base image already carries CA certificates, so an https mirror works.
+ARG DEBIAN_MIRROR=
+RUN if [ -n "$DEBIAN_MIRROR" ]; then \
+        sed -i "s|http://deb\.debian\.org|$DEBIAN_MIRROR|g" \
+            /etc/apt/sources.list.d/debian.sources /etc/apt/sources.list 2>/dev/null || true; \
+        echo "apt: deb.debian.org replaced with $DEBIAN_MIRROR"; \
+    fi
+
 # libgl1 and libglib2.0-0 are opencv's, libgomp1 is Paddle's. Without them the
 # import fails at startup rather than at first request, which is at least loud.
 RUN apt-get update \

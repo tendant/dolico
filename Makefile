@@ -186,6 +186,9 @@ endif
 ifneq ($(PIP_INDEX_URL),)
 export PIP_INDEX_URL
 endif
+ifneq ($(DEBIAN_MIRROR),)
+export DEBIAN_MIRROR
+endif
 
 IMAGE_API := $(DOLICO_REGISTRY)/dolico-api:$(DOLICO_TAG)
 IMAGE_OCR := $(DOLICO_REGISTRY)/dolico-ocr:$(DOLICO_TAG)
@@ -197,8 +200,15 @@ IMAGE_OCR := $(DOLICO_REGISTRY)/dolico-ocr:$(DOLICO_TAG)
 # you are offline or deliberately pinning what you already have.
 PULL ?= --pull
 
+# One at a time, not the parallel build compose does by default. The api stage
+# is a full Rust release compile that will take every core it is given, and the
+# ocr stage unpacks several gigabytes of PaddlePaddle wheels; run together on a
+# Docker VM with 8GB they lose to the OOM killer, which surfaces as a step
+# dying with exit code 137 rather than as anything about memory. The CI
+# pipeline in dolico-stack is sequential for the same reason.
 image:
-	@$(COMPOSE) build $(PULL)
+	@$(COMPOSE) build $(PULL) api
+	@$(COMPOSE) build $(PULL) ocr
 	@echo "built $(IMAGE_API)"
 	@echo "built $(IMAGE_OCR)"
 

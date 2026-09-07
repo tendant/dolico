@@ -32,6 +32,7 @@ services:
         # slow index".
         PYPI_FILES_MIRROR: ${PYPI_FILES_MIRROR:-}
         PIP_INDEX_URL: ${PIP_INDEX_URL:-}
+        DEBIAN_MIRROR: ${DEBIAN_MIRROR:-}
     # PaddlePaddle publishes no Linux aarch64 wheels -- only manylinux x86_64,
     # macOS arm64 and Windows. So this image is amd64 whatever the host is.
     # On an Apple Silicon machine that means emulation, and Paddle is CPU-bound

@@ -115,6 +115,7 @@ in `deploy/.env` so every later `make image` picks it up:
 CARGO_REGISTRY_MIRROR=sparse+https://mirrors.ustc.edu.cn/crates.io-index/
 PYPI_FILES_MIRROR=https://pypi.tuna.tsinghua.edu.cn
 PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple
+DEBIAN_MIRROR=https://mirrors.tuna.tsinghua.edu.cn
 ```
 
 Compose reads that file on its own, because it sits beside the compose file —
@@ -166,6 +167,30 @@ way.
 
 Nothing equivalent is needed for the Go stage: this module has no third-party
 dependencies, so there is no `GOPROXY` to point anywhere.
+
+### Debian packages
+
+`DEBIAN_MIRROR` moves the OCR image's `apt-get` off `deb.debian.org`, which on
+a bad link stalls that step for tens of minutes before it gets anywhere:
+
+```bash
+DEBIAN_MIRROR=https://mirrors.tuna.tsinghua.edu.cn make image
+```
+
+One substitution covers both suites — the mirrors lay them out exactly as the
+archive does, `/debian` and `/debian-security` under the same host — and the
+base image already carries CA certificates, so an `https` mirror works. The API
+image needs no equivalent: its runtime stage installs nothing.
+
+### A build step that dies with exit code 137
+
+That is SIGKILL, and on a build it is almost always the OOM killer rather than
+anything about the step it lands on. `make image` builds the two images one
+after another for this reason: the api stage is a full Rust release compile
+that takes every core it is given, the ocr stage unpacks several gigabytes of
+PaddlePaddle wheels, and on a Docker VM with 8GB the pair does not fit. Running
+`docker compose build` by hand builds them in parallel and can still hit it —
+add the service name, or raise the VM's memory in Docker Desktop's settings.
 
 **Installing the toolchain itself** — for `make build` on the host, outside
 Docker — is a separate problem with separate variables, since rustup fetches
@@ -370,6 +395,7 @@ this compose file exposes:
 | `CARGO_REGISTRY_MIRROR` | unset | crates.io source replacement for the Rust build stage; unset means upstream |
 | `PYPI_FILES_MIRROR` | unset | host to rewrite `files.pythonhosted.org` to in `uv.lock`; the one that speeds up the OCR build |
 | `PIP_INDEX_URL` | unset | PyPI index for pip and for re-resolving; not consulted by `uv sync --frozen` |
+| `DEBIAN_MIRROR` | unset | replaces `deb.debian.org` in the OCR image's apt sources |
 | `DOLICO_REGISTRY` | `reg.memochat.ai` | where images are pulled from; `make image` defaults it to `local` |
 | `DOLICO_TAG` | `latest` | image tag; `make image` defaults it to `dev`. Pin it to a commit SHA on a server |
 | `DOLICO_PORT` | `8080` | host port, bound to `127.0.0.1` |
