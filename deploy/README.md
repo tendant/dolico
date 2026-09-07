@@ -66,6 +66,47 @@ makes it an error.
 
 `DOLICO_REGISTRY` overrides the registry host if the images live somewhere else.
 
+## Pushing images to a registry
+
+`deploy/.env` names the registry, and building and pushing then agree by
+construction rather than by remembering to pass the same two variables twice:
+
+```bash
+# deploy/.env -- gitignored
+DOLICO_REGISTRY=reg.memochat.ai
+DOLICO_TAG=39d18d6
+DOLICO_REGISTRY_USER=tendant
+DOLICO_REGISTRY_PASSWORD=...
+```
+
+```bash
+make login    # only when the host is not logged in already
+make image
+make push
+```
+
+`make push` refuses while `DOLICO_REGISTRY` is `local` — the default, and a
+name that would otherwise produce a confusing failure deep inside docker rather
+than an obvious one here.
+
+**The password is optional and does not have to be there at all.** With no
+`DOLICO_REGISTRY_PASSWORD`, `make login` runs an ordinary interactive
+`docker login`, which leaves the credential in docker's own store and nothing
+on disk in this repository. That is the better arrangement wherever a person is
+present to type it; the variable exists for hosts where none is.
+
+When it is set, it reaches docker on stdin — never as an argument, which every
+other user on the host can read out of `ps`, and never through a make variable,
+which `make -n` would print. `scripts/registry-login` reads the file rather than
+sourcing it, so a `$` or a backtick in a password is sent as written instead of
+being expanded or executed.
+
+`docker push` is still the only command in this repository that contacts a
+registry, and `make push` is still the only target that runs it. CI does its own
+pushing from `dolico-stack/ci/pipeline.hcl`, with no password anywhere in it:
+that task mounts the host's docker config read-only and reuses the login
+already on it.
+
 ## The OCR image is amd64 only
 
 PaddlePaddle publishes no Linux aarch64 wheels — PyPI has `manylinux1_x86_64`,
@@ -398,6 +439,8 @@ this compose file exposes:
 | `DEBIAN_MIRROR` | unset | replaces `deb.debian.org` in the OCR image's apt sources |
 | `DOLICO_REGISTRY` | `reg.memochat.ai` | where images are pulled from; `make image` defaults it to `local` |
 | `DOLICO_TAG` | `latest` | image tag; `make image` defaults it to `dev`. Pin it to a commit SHA on a server |
+| `DOLICO_REGISTRY_USER` | unset | registry username, for `make login` |
+| `DOLICO_REGISTRY_PASSWORD` | unset | registry password; unset means `make login` prompts |
 | `DOLICO_PORT` | `8080` | host port, bound to `127.0.0.1` |
 | `DOLICO_OCR_WORKERS` | `2` | OCR processes; also the client's concurrency |
 | `OCR_MEM_LIMIT` | `8g` | keep at roughly `workers × 3GB` + headroom |

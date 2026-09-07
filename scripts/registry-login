@@ -1,0 +1,43 @@
+#!/bin/sh
+# Log in to the registry `make push` will push to.
+#
+# The credentials are read out of deploy/.env here rather than passed in as
+# arguments or through make. An argument is visible in `ps` to every user on
+# the host for as long as the process runs, and a make variable would be
+# printed by `make -n`; the password reaches docker on stdin instead, which is
+# neither. Nothing is written anywhere but docker's own credential store.
+set -eu
+
+ENV_FILE="${ENV_FILE:-deploy/.env}"
+
+# One key out of the env file. Deliberately not `. "$ENV_FILE"`: sourcing runs
+# the file as shell, so a $ or a backtick in a password would be expanded or
+# executed rather than sent.
+value() {
+    [ -f "$ENV_FILE" ] || return 0
+    sed -n "s/^$1=//p" "$ENV_FILE" | head -1 | sed -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'\$//"
+}
+
+registry="${DOLICO_REGISTRY:-$(value DOLICO_REGISTRY)}"
+user="${DOLICO_REGISTRY_USER:-$(value DOLICO_REGISTRY_USER)}"
+password="${DOLICO_REGISTRY_PASSWORD:-$(value DOLICO_REGISTRY_PASSWORD)}"
+
+if [ -z "$registry" ] || [ "$registry" = local ]; then
+    echo "DOLICO_REGISTRY is '${registry:-unset}', which is not somewhere to push." >&2
+    echo "Set it in $ENV_FILE, e.g. DOLICO_REGISTRY=reg.memochat.ai" >&2
+    exit 1
+fi
+
+if [ -z "$password" ]; then
+    # No stored password is a perfectly good answer -- an interactive login, or
+    # a credential helper that already holds one, leaves nothing on disk here.
+    echo "No DOLICO_REGISTRY_PASSWORD in $ENV_FILE; logging in interactively."
+    if [ -n "$user" ]; then
+        exec docker login "$registry" -u "$user"
+    fi
+    exec docker login "$registry"
+fi
+
+[ -n "$user" ] || { echo "DOLICO_REGISTRY_PASSWORD is set but DOLICO_REGISTRY_USER is not." >&2; exit 1; }
+
+printf '%s' "$password" | docker login "$registry" -u "$user" --password-stdin

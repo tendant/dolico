@@ -1,7 +1,7 @@
 .PHONY: help build build-go build-rust run run-ocr run-vision ocr ocr-text ocr-vision \
         test test-go test-rust test-ocr lint fmt e2e e2e-ocr e2e-vision bench bench-ocr \
         bench-vision bench-hard testdata clean clean-ocr \
-        image up down logs config verify compose-check
+        image up down logs config verify compose-check push login
 
 # Caches live inside the repo so a build never depends on, or pollutes, the
 # machine's shared Go cache.
@@ -59,6 +59,8 @@ help:
 	@echo "  logs        Follow both services"
 	@echo "  verify      Run the e2e sweep against the running deployment"
 	@echo "  down        Stop and remove them (volumes survive)"
+	@echo "  login       Log in to $(DOLICO_REGISTRY), with credentials from deploy/.env"
+	@echo "  push        Push both images to $(DOLICO_REGISTRY)"
 
 build: build-rust build-go
 
@@ -165,8 +167,15 @@ override COMPOSE := docker compose -f deploy/docker-compose.yml
 #
 # Nothing here pushes. `docker push` is the only command that contacts a
 # registry and no target runs it -- CI does, from dolico-stack/ci/pipeline.hcl.
-DOLICO_REGISTRY ?= local
-DOLICO_TAG ?= dev
+# One key out of deploy/.env. Compose reads that file on its own for everything
+# it interpolates, but make does not, and these two are needed here as well --
+# to name the images in output, and to refuse to push to `local`. Environment
+# first, then the file, then the default: `?=` keeps an environment value, and
+# the file only decides what the default would otherwise have been.
+dotenv = $(shell sed -n 's/^$(1)=//p' deploy/.env 2>/dev/null | head -1 | tr -d '"'"'"'"')
+
+DOLICO_REGISTRY ?= $(or $(call dotenv,DOLICO_REGISTRY),local)
+DOLICO_TAG ?= $(or $(call dotenv,DOLICO_TAG),dev)
 export DOLICO_REGISTRY DOLICO_TAG
 
 # Optional build-time mirrors, exported so that both
@@ -256,6 +265,26 @@ verify:
 
 config: compose-check
 	@$(COMPOSE) config
+
+# Push what `make image` built. The registry and tag come from deploy/.env like
+# everything else, so building and pushing agree by construction rather than by
+# remembering to pass the same two variables twice.
+push: compose-check
+	@if [ "$(DOLICO_REGISTRY)" = "local" ]; then \
+		echo "DOLICO_REGISTRY is still \"local\" -- that is the default for a build"; \
+		echo "host, not a registry. Set it in deploy/.env:"; \
+		echo; \
+		echo "  DOLICO_REGISTRY=reg.memochat.ai"; \
+		echo "  DOLICO_TAG=$$(git rev-parse --short=7 HEAD 2>/dev/null || echo '<commit>')"; \
+		exit 1; \
+	fi
+	@$(COMPOSE) push
+	@echo "pushed $(IMAGE_API)"
+	@echo "pushed $(IMAGE_OCR)"
+
+# Credentials never pass through make -- see the script.
+login:
+	@./scripts/registry-login
 
 # ---------------------------------------------------------------------------
 # OCR tier
