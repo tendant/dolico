@@ -4,19 +4,19 @@ Two containers on one host: the API server and the OCR tier. The vision tier is
 not included — see *Turning on the vision tier* below.
 
 ```bash
-make deploy-build           # local/dolico-api:dev, local/dolico-ocr:dev
-make deploy-up
+make image      # local/dolico-api:dev, local/dolico-ocr:dev
+make up
 curl -F file=@testdata/mixed.pdf 'http://127.0.0.1:8080/v1/documents?wait=true'
 ```
 
-`make deploy-*` names what it builds `local/dolico-{api,ocr}:dev`, because a
+`make image` names what it builds `local/dolico-{api,ocr}:dev`, because a
 build host is producing images for itself and a registry name on something
 that will never be pushed reads like a lie in `docker images`. Override with
 `DOLICO_REGISTRY` and `DOLICO_TAG` when you do mean to push:
 
 ```bash
 DOLICO_REGISTRY=reg.memochat.ai DOLICO_TAG=$(git rev-parse --short=7 HEAD) \
-  make deploy-build
+  make image
 ```
 
 No target here pushes; `docker push` is the only command that talks to a
@@ -53,10 +53,11 @@ docker compose -f docker-compose.yml pull
 docker compose -f docker-compose.yml up -d --no-build
 ```
 
-**Pin `DOLICO_TAG`.** It defaults to `latest` so the build host's `make
-deploy-up` keeps working, but a server left on `latest` with
-`restart: unless-stopped` picks up a different version on its next reboot,
-which is a version change nobody performed and nobody logged.
+**Pin `DOLICO_TAG`.** The compose file defaults it to `latest` so that a bare
+`docker compose` invocation resolves to something at all — `make` sets `dev`
+and never touches it. A server left on `latest` with `restart: unless-stopped`
+picks up a different version on its next reboot, which is a version change
+nobody performed and nobody logged.
 
 **Pass `--no-build`.** A service that has a build section as well as an image
 name is built, not pulled, when compose cannot find the image — so a typo in
@@ -248,8 +249,8 @@ this compose file exposes:
 
 | Variable | Default | |
 | --- | --- | --- |
-| `DOLICO_REGISTRY` | `reg.memochat.ai` | where images are pulled from; `make deploy-*` defaults it to `local` |
-| `DOLICO_TAG` | `latest` | image tag; `make deploy-*` defaults it to `dev`. Pin it to a commit SHA on a server |
+| `DOLICO_REGISTRY` | `reg.memochat.ai` | where images are pulled from; `make image` defaults it to `local` |
+| `DOLICO_TAG` | `latest` | image tag; `make image` defaults it to `dev`. Pin it to a commit SHA on a server |
 | `DOLICO_PORT` | `8080` | host port, bound to `127.0.0.1` |
 | `DOLICO_OCR_WORKERS` | `2` | OCR processes; also the client's concurrency |
 | `OCR_MEM_LIMIT` | `8g` | keep at roughly `workers × 3GB` + headroom |
@@ -260,7 +261,7 @@ this compose file exposes:
 ## Verifying a deployment
 
 ```bash
-make deploy-verify
+make verify
 ```
 
 This runs the repository's full end-to-end sweep against the containers that

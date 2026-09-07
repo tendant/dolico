@@ -1,8 +1,7 @@
 .PHONY: help build build-go build-rust run run-ocr run-vision ocr ocr-text ocr-vision \
         test test-go test-rust test-ocr lint fmt e2e e2e-ocr e2e-vision bench bench-ocr \
         bench-vision bench-hard testdata clean clean-ocr \
-        deploy-build deploy-up deploy-down deploy-logs deploy-config deploy-verify \
-        deploy-images
+        image up down logs config verify
 
 # Caches live inside the repo so a build never depends on, or pollutes, the
 # machine's shared Go cache.
@@ -55,12 +54,11 @@ help:
 	@echo "  bench-hard   Score the real-scan corpus in testdata/corpus-hard"
 	@echo ""
 	@echo "Deployment (two containers, loopback only -- see deploy/README.md):"
-	@echo "  deploy-build Build both images locally as $(DOLICO_REGISTRY)/dolico-{api,ocr}:$(DOLICO_TAG)"
-	@echo "  deploy-images Show what the last build produced"
-	@echo "  deploy-up    Start them; first run downloads OCR models"
-	@echo "  deploy-logs  Follow both services"
-	@echo "  deploy-verify Run the e2e sweep against the running deployment"
-	@echo "  deploy-down  Stop and remove them (volumes survive)"
+	@echo "  image       Build both images as $(DOLICO_REGISTRY)/dolico-{api,ocr}:$(DOLICO_TAG)"
+	@echo "  up          Start them; first run downloads OCR models"
+	@echo "  logs        Follow both services"
+	@echo "  verify      Run the e2e sweep against the running deployment"
+	@echo "  down        Stop and remove them (volumes survive)"
 
 build: build-rust build-go
 
@@ -139,13 +137,13 @@ clean:
 # Deployment
 #
 # Two containers on one host, published on loopback only. dolico has no
-# authentication, so `deploy` is not the whole job -- read deploy/README.md for
+# authentication, so `up` is not the whole job -- read deploy/README.md for
 # what has to sit in front of it.
 # ---------------------------------------------------------------------------
 
 COMPOSE := docker compose -f deploy/docker-compose.yml
 
-# What `make deploy-*` names the images it builds.
+# What `make image` names the images it builds.
 #
 # The compose file defaults these to reg.memochat.ai, so that a server holding
 # nothing but that file can pull. A build host is the other case: it is
@@ -157,7 +155,7 @@ COMPOSE := docker compose -f deploy/docker-compose.yml
 # one variable away:
 #
 #   DOLICO_REGISTRY=reg.memochat.ai DOLICO_TAG=$(git rev-parse --short=7 HEAD) \
-#     make deploy-build
+#     make image
 #
 # Nothing here pushes. `docker push` is the only command that contacts a
 # registry and no target runs it -- CI does, from dolico-stack/ci/pipeline.hcl.
@@ -168,37 +166,33 @@ export DOLICO_REGISTRY DOLICO_TAG
 IMAGE_API := $(DOLICO_REGISTRY)/dolico-api:$(DOLICO_TAG)
 IMAGE_OCR := $(DOLICO_REGISTRY)/dolico-ocr:$(DOLICO_TAG)
 
-deploy-build:
+image:
 	@$(COMPOSE) build
 	@echo "built $(IMAGE_API)"
 	@echo "built $(IMAGE_OCR)"
 
-deploy-up:
+up:
 	@$(COMPOSE) up -d
 	@echo "API on 127.0.0.1:$${DOLICO_PORT:-8080} (loopback only), from $(IMAGE_API)."
 	@echo "First start downloads OCR models and is unhealthy meanwhile:"
-	@echo "  make deploy-logs"
+	@echo "  make logs"
 
-deploy-down:
+down:
 	@$(COMPOSE) down
 
-deploy-logs:
+logs:
 	@$(COMPOSE) logs -f
 
 # Run the full e2e sweep against a deployment that is already running, rather
 # than against a server the script starts for itself. Same checker, same schema
 # validation -- the difference is that this one is talking to the containers you
 # are about to put behind a gateway.
-deploy-verify:
+verify:
 	@DOLICO_EXPECT_OCR=$(EXPECT_OCR) \
 		./scripts/e2e_check.py http://$(HOST):$${DOLICO_PORT:-8080}
 
-deploy-config:
+config:
 	@$(COMPOSE) config
-
-deploy-images:
-	@docker images --filter=reference='$(IMAGE_API)' --filter=reference='$(IMAGE_OCR)' \
-		--format 'table {{.Repository}}:{{.Tag}}\t{{.Size}}\t{{.CreatedSince}}'
 
 # ---------------------------------------------------------------------------
 # OCR tier

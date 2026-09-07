@@ -91,7 +91,8 @@ make run-vision  # the API server, with escalation to Tier 3 enabled
 As two containers on one host, for an internal deployment:
 
 ```bash
-make deploy-up   # API on 127.0.0.1:8080, OCR service alongside it
+make image      # build both images locally
+make up         # API on 127.0.0.1:8080, OCR service alongside it
 ```
 
 That publishes on loopback only, because **dolico has no authentication of any
