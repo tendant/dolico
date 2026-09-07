@@ -1,7 +1,7 @@
 .PHONY: help build build-go build-rust run run-ocr run-vision ocr ocr-text ocr-vision \
         test test-go test-rust test-ocr lint fmt e2e e2e-ocr e2e-vision bench bench-ocr \
         bench-vision bench-hard testdata clean clean-ocr \
-        image up down logs config verify
+        image up down logs config verify compose-check
 
 # Caches live inside the repo so a build never depends on, or pollutes, the
 # machine's shared Go cache.
@@ -145,7 +145,9 @@ clean:
 # which compose reads on its own because it sits beside the compose file. No
 # --env-file here: the default is the same file a server would use, so one
 # arrangement covers both.
-COMPOSE := docker compose -f deploy/docker-compose.yml
+# `override`, so that a COMPOSE in the environment cannot replace this under
+# `make -e` and quietly drop the `compose` word.
+override COMPOSE := docker compose -f deploy/docker-compose.yml
 
 # What `make image` names the images it builds.
 #
@@ -206,22 +208,42 @@ PULL ?= --pull
 # Docker VM with 8GB they lose to the OOM killer, which surfaces as a step
 # dying with exit code 137 rather than as anything about memory. The CI
 # pipeline in dolico-stack is sequential for the same reason.
-image:
+# A docker CLI without the Compose v2 plugin does not say so. `compose` is not
+# a subcommand it knows, so everything after it is parsed as docker's own
+# flags and you get
+#
+#   unknown shorthand flag: 'f' in -f
+#
+# which names neither compose nor the plugin, on a machine where the fix is one
+# package. Every target that shells out to compose checks first.
+.PHONY: compose-check
+compose-check:
+	@docker compose version >/dev/null 2>&1 || { \
+		echo "docker compose (the v2 plugin) is not installed."; \
+		echo "  Debian/Ubuntu:  apt-get install docker-compose-plugin"; \
+		echo "  RHEL/Fedora:    dnf install docker-compose-plugin"; \
+		echo "  otherwise:      https://docs.docker.com/compose/install/linux/"; \
+		echo; \
+		echo "This repo needs v2: the compose file uses top-level \`name:\`,"; \
+		echo "which the standalone docker-compose v1 does not support."; \
+		exit 1; }
+
+image: compose-check
 	@$(COMPOSE) build $(PULL) api
 	@$(COMPOSE) build $(PULL) ocr
 	@echo "built $(IMAGE_API)"
 	@echo "built $(IMAGE_OCR)"
 
-up:
+up: compose-check
 	@$(COMPOSE) up -d
 	@echo "API on 127.0.0.1:$${DOLICO_PORT:-8080} (loopback only), from $(IMAGE_API)."
 	@echo "First start downloads OCR models and is unhealthy meanwhile:"
 	@echo "  make logs"
 
-down:
+down: compose-check
 	@$(COMPOSE) down
 
-logs:
+logs: compose-check
 	@$(COMPOSE) logs -f
 
 # Run the full e2e sweep against a deployment that is already running, rather
@@ -232,7 +254,7 @@ verify:
 	@DOLICO_EXPECT_OCR=$(EXPECT_OCR) \
 		./scripts/e2e_check.py http://$(HOST):$${DOLICO_PORT:-8080}
 
-config:
+config: compose-check
 	@$(COMPOSE) config
 
 # ---------------------------------------------------------------------------
