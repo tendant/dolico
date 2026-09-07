@@ -327,7 +327,13 @@ push: registry-check compose-check
 		echo "  make image"; \
 		exit 1; \
 	fi
-	@$(COMPOSE) push
+	@$(COMPOSE) push || { \
+		echo; \
+		echo "If that was an authorization failure, this host has no credentials"; \
+		echo "for $(DOLICO_REGISTRY):"; \
+		echo "  make login"; \
+		exit 1; \
+	}
 	@echo "pushed $(IMAGE_API)"
 	@echo "pushed $(IMAGE_OCR)"
 
