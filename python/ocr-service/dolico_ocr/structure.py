@@ -160,7 +160,36 @@ class StructureEngine:
             self.load()
         with self._lock:
             results = self._pipeline.predict(
-                image, use_table_orientation_classify=self.table_orientation
+                image,
+                use_table_orientation_classify=self.table_orientation,
+                # Do not let PaddleX re-read a table's cells with an OCR
+                # pipeline it never built.
+                #
+                # With this left at its default of True, a table whose cells
+                # need splitting reaches
+                # table_recognition/pipeline_v2.py:704, which calls
+                # `self.general_ocr_pipeline.text_rec_model(...)` with no
+                # None check. That pipeline is only constructed when the table
+                # recogniser owns its own OCR models (`use_ocr_model`), which
+                # it does not here — the detection and recognition models are
+                # named at the PP-StructureV3 level instead. The lazy
+                # construction that would fix it cannot run: it is guarded by
+                # `self.cells_split_ocr == False`, and the same method sets
+                # that field to True unconditionally at line 1171. The two
+                # conditions are mutually exclusive, so on this configuration
+                # the attribute is always None on that path.
+                #
+                # Observed as five AttributeErrors and three HTTP 500s in a
+                # day, on the tables that happen to need the split. dolico
+                # turns a failed page into an empty one with `ocr_failed` in
+                # its reasons, so it costs a reader their table and says
+                # nothing to them about why.
+                #
+                # False takes the other branch: the table is read from the
+                # page's own OCR result rather than re-read per cell. Cell
+                # text is then whatever the overall pass found in that region,
+                # which is what every table without split cells already gets.
+                use_ocr_results_with_table_cells=False,
             )
         if not results:
             return [], []
