@@ -355,3 +355,63 @@ func TestVisionSurfacesServiceFailures(t *testing.T) {
 		t.Errorf("err = %v; the service's reason should survive", err)
 	}
 }
+
+// A cold vision model fetches gigabytes of weights before it infers anything,
+// so a vision request legitimately outlives an OCR one. Sharing the OCR
+// timeout is what cut off a completed MinerU read on the estate -- twice --
+// and recorded it as a failure.
+func TestVisionRequestsGetTheirOwnTimeout(t *testing.T) {
+	svc := &fakeService{visionAvailable: true, visionBody: visionResponse(1)}
+	base := svc.start(t)
+
+	ocr, err := paddleocr.New(base,
+		// An OCR timeout far too short for the delay below, and a vision
+		// timeout comfortably longer. If the two shared a client this fails.
+		paddleocr.WithTimeout(150*time.Millisecond),
+		paddleocr.WithVisionTimeout(10*time.Second),
+	)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	svc.extractDelay = 600 * time.Millisecond
+
+	v := paddleocr.NewVision(ocr)
+	if v == nil {
+		t.Fatal("expected a vision engine")
+	}
+	if _, err := v.Extract(context.Background(), request(t, 1)); err != nil {
+		t.Fatalf("vision Extract: %v; a vision call must not be bound by the OCR timeout", err)
+	}
+}
+
+// A tier swapped underneath a running API leaves this engine carrying the name
+// startup found. A successful call corrects it; a failing one used to not, so
+// every log line about the failure named the engine that was no longer there.
+func TestVisionRelearnsItsNameAfterAFailure(t *testing.T) {
+	svc := &fakeService{visionAvailable: true, extractStatus: 503,
+		extractBody: map[string]string{"kind": "unavailable", "message": "down"}}
+	ocr, err := paddleocr.New(svc.start(t))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	v := paddleocr.NewVision(ocr)
+	if v == nil || v.Name() != paddleocr.DefaultVisionName {
+		t.Fatalf("expected the default name to start with, got %v", v)
+	}
+
+	// The operator swaps the engine; nothing tells this process.
+	svc.setVisionEngine("glm-ocr")
+
+	if _, err := v.Extract(context.Background(), request(t, 1)); err == nil {
+		t.Fatal("expected the extraction to fail")
+	}
+	// The re-read runs in the background so the caller is not held up by it.
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if v.Name() == "glm-ocr" {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Errorf("Name = %q after a failure; want the service's current glm-ocr", v.Name())
+}

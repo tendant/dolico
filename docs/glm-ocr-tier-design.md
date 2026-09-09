@@ -487,6 +487,43 @@ options are to measure it properly (`make bench-glm`), to turn the probe off
 and let only the threshold escalate, or to run MinerU for this tier and
 GLM-OCR not at all.
 
+## And what MinerU did on the same page
+
+The comparison the benchmark column was for, run on the estate rather than on a
+developer machine, against the same fixture on the same host an hour apart.
+
+| `faded.pdf` | GLM-OCR (cloud) | MinerU (`hybrid-engine`) |
+| --- | --- | --- |
+| engine in provenance | `pp-structurev3` — Tier 3 gave nothing | `mineru` |
+| page reasons | `vision_empty`, `vision_failed` | `vision_escalated` |
+| blocks | 1 | 8 |
+| text | `b` | the whole receipt |
+
+MinerU returns `SHIPPING RECEIPT`, `Consignment 8842-QX`, every line item, and
+`Total due 1,420.75`. One word is wrong on the page — `Terais` for "Terms are"
+— against a page the other engine reported as a single character.
+
+The eight blocks are the one-column-table rule doing its job: MinerU returns the
+receipt as an 8×1 grid and the adapter flattens it into paragraphs rather than
+inventing a table nobody drew.
+
+**Two numbers from that run correct this document.**
+
+*Memory.* The OCR container sits at **2.64GB** with MinerU resident and warm,
+on a 15GB host with 11GB still available. This document has said ~7GB per
+worker throughout, from a Mac where MinerU had loaded both its VLM and its
+pipeline model set. Nothing here came close to memory pressure, and the
+warning about not raising `DOLICO_OCR_WORKERS` is more cautious than the
+measurement warrants.
+
+*Install size on Linux.* The MinerU extra pulled **19 CUDA packages** —
+`nvidia-cublas` alone 543MB, 3.02GB in total — onto a host with no GPU,
+producing a 10.6GB image and a build that spent over three hours downloading
+them at 251 KB/s. None of that appeared in the earlier "~1.1GB venv" figure
+because that was measured on Apple Silicon, where torch ships no CUDA wheels at
+all and the whole stack is invisible. Pinning torch to PyTorch's CPU index on
+Linux removes all 19.
+
 ## Recorded concerns
 
 **1. Its layout stage is Tier 2's model family.** GLM-OCR detects regions with

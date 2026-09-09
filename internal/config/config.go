@@ -94,6 +94,16 @@ type Config struct {
 	// is OCR misreading half a page at 0.938 confidence. Costs one vision
 	// call per document with scanned pages.
 	VisionProbe bool
+	// VisionTimeout bounds a single vision request, separately from OCRTimeout.
+	//
+	// Longer because a vision call is a different kind of work and its first
+	// one is a different kind again: the model is fetched lazily, so the first
+	// escalated page of a fresh deployment waits on gigabytes of weights before
+	// any inference starts. Measured on the estate: a cold MinerU call took
+	// about fourteen minutes, exceeded the 10m OCR timeout, and the router
+	// recorded `vision extraction failed` for work the service had completed
+	// and handed back to nobody.
+	VisionTimeout time.Duration
 	// VisionDisagreement is how far apart the two tiers must be on the probed
 	// page before the OCR tier is distrusted for the whole document.
 	VisionDisagreement float64
@@ -116,6 +126,7 @@ func Load() (*Config, error) {
 		VisionEnabled:      envBool("DOLICO_VISION_ENABLED", false),
 		VisionThreshold:    0.35,
 		VisionMaxPages:     5,
+		VisionTimeout:      20 * time.Minute,
 		VisionProbe:        envBool("DOLICO_VISION_PROBE", true),
 		VisionDisagreement: quality.DefaultDisagreement,
 	}
@@ -175,6 +186,12 @@ func Load() (*Config, error) {
 		return nil, fmt.Errorf(
 			"DOLICO_VISION_THRESHOLD (%v) must be below DOLICO_OCR_THRESHOLD (%v)",
 			c.VisionThreshold, c.OCRThreshold)
+	}
+	if c.VisionTimeout, err = envDuration("DOLICO_VISION_TIMEOUT", c.VisionTimeout); err != nil {
+		return nil, err
+	}
+	if c.VisionTimeout <= 0 {
+		return nil, fmt.Errorf("DOLICO_VISION_TIMEOUT must be positive, got %v", c.VisionTimeout)
 	}
 	if c.VisionMaxPages, err = envInt("DOLICO_VISION_MAX_PAGES", c.VisionMaxPages); err != nil {
 		return nil, err

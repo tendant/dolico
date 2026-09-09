@@ -34,7 +34,11 @@ structure = ["paddlex[ocr]>=3.7"]
 # uncapped range would resolve to a version this line cannot install the moment
 # 4.0 goes stable. Lifting the cap means picking the new extra, not just the
 # new number.
-vision = ["mineru[core]>=2.5,<4"]
+#
+# torch and torchvision are named here even though MinerU pulls them anyway:
+# `tool.uv.sources` only binds a project's *direct* dependencies, so the CPU
+# index below cannot reach a transitive one. Naming them makes the pin apply.
+vision = ["mineru[core]>=2.5,<4", "torch", "torchvision"]
 # GLM-OCR (Tier 3, the alternative engine). Selected with
 # DOLICO_VISION_ENGINE=glm-ocr; see docs/glm-ocr-tier-design.md.
 #
@@ -72,6 +76,28 @@ glm-selfhosted = ["glmocr[layout]>=0.1.5"]
 conflicts = [
     [{ extra = "vision" }, { extra = "glm-selfhosted" }],
 ]
+
+# torch from PyTorch's CPU index on Linux, and only there.
+#
+# The default wheels bring the whole CUDA runtime as hard dependencies -- 19
+# packages, `nvidia-cublas` alone 543MB, ~3.0GB in total -- onto a host that
+# may well have no GPU. Measured on the estate that runs this: the OCR image
+# came out at 10.6GB, and pulling those wheels through the configured PyPI
+# mirror took over three hours at 251 KB/s. The CPU index serves the same
+# torch without them, and answers that host at 5.4 MB/s.
+#
+# Linux only, because that is where the CUDA wheels exist at all: macOS torch
+# has no GPU variant to pin away from, and a developer on CUDA hardware who
+# wants the default gets it by removing this block rather than by discovering
+# their GPU quietly stopped being used.
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[tool.uv.sources]
+torch = [{ index = "pytorch-cpu", marker = "sys_platform == 'linux'" }]
+torchvision = [{ index = "pytorch-cpu", marker = "sys_platform == 'linux'" }]
 
 [build-system]
 requires = ["hatchling"]

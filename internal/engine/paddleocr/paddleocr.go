@@ -82,6 +82,10 @@ type Engine struct {
 	// visionEngine is which engine is in that slot -- the tier has more than
 	// one, and the name feeds provenance and the page cache key.
 	visionEngine string
+
+	// visionClient, when set, serves tier=vision requests instead of client.
+	// See WithVisionTimeout.
+	visionClient *http.Client
 }
 
 // Option configures the engine.
@@ -95,6 +99,20 @@ func WithHTTPClient(c *http.Client) Option {
 // WithTimeout sets the per-request timeout.
 func WithTimeout(d time.Duration) Option {
 	return func(e *Engine) { e.client.Timeout = d }
+}
+
+// WithVisionTimeout gives tier=vision requests their own, longer deadline.
+//
+// A separate client rather than a larger shared one: an OCR call that has hung
+// for ten minutes is a fault and should be cut off, while a vision call that
+// has run for ten minutes may simply be a cold model still fetching its
+// weights. Measured on the estate -- a first MinerU call took about fourteen
+// minutes, was cut off at the OCR timeout, and its completed result was
+// discarded twice before the weights were cached.
+func WithVisionTimeout(d time.Duration) Option {
+	return func(e *Engine) {
+		e.visionClient = &http.Client{Timeout: d}
+	}
 }
 
 // WithConcurrency overrides how many extract requests run at once. Zero or
@@ -401,7 +419,11 @@ func (e *Engine) extractTier(
 	}
 	httpReq.Header.Set("Content-Type", contentType)
 
-	resp, err := e.client.Do(httpReq)
+	client := e.client
+	if tier == "vision" && e.visionClient != nil {
+		client = e.visionClient
+	}
+	resp, err := client.Do(httpReq)
 	if err != nil {
 		return nil, none, fmt.Errorf("paddleocr: request to %s failed: %w", e.baseURL, err)
 	}

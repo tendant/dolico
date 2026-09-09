@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/tendant/dolico/internal/canonical"
 	"github.com/tendant/dolico/internal/engine"
@@ -108,10 +109,37 @@ func (e *VisionEngine) Extract(ctx context.Context, req *engine.ExtractRequest) 
 
 	res, who, err := e.ocr.extractTier(ctx, req, req.Pages, "vision")
 	if err != nil {
+		// A failed call teaches nothing about who answered, so the name this
+		// engine is carrying stays whatever startup found -- and if the
+		// service has been reconfigured since, every log line about the
+		// failure names the wrong engine. That is exactly how a MinerU tier
+		// came to report "escalating to vision engine=glm-ocr" while it
+		// downloaded MinerU's weights.
+		//
+		// So re-read it, in the background: the caller gets its error now, and
+		// the next attempt is described correctly.
+		go e.refreshName()
 		return nil, err
 	}
 	e.adopt(who)
 	return res, nil
+}
+
+// refreshName re-reads which engine the service has in its Tier 3 slot.
+//
+// Its own context, not the caller's: this runs after a request failed, and
+// that request's context is usually already cancelled or past its deadline.
+func (e *VisionEngine) refreshName() {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := e.ocr.refreshVersion(ctx); err != nil {
+		return
+	}
+	if name := e.ocr.VisionEngineName(); name != "" {
+		e.mu.Lock()
+		e.name = name
+		e.mu.Unlock()
+	}
 }
 
 // adopt records who actually answered.

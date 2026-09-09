@@ -277,6 +277,7 @@ func ocrEngine(cfg *config.Config, log *slog.Logger) (engine.Engine, error) {
 	for attempt := 1; ; attempt++ {
 		ocr, err = paddleocr.New(cfg.OCRURL,
 			paddleocr.WithTimeout(cfg.OCRTimeout),
+			paddleocr.WithVisionTimeout(cfg.VisionTimeout),
 			paddleocr.WithConcurrency(cfg.OCRConcurrency),
 			paddleocr.WithLogger(log))
 		if err == nil {

@@ -28,12 +28,19 @@ import (
 // classification are what these tests are about; the real service is covered
 // separately below, and only when one is running.
 type fakeService struct {
+	// mu guards the fields a test mutates while the server is serving.
+	mu sync.Mutex
+
 	schemaVersion string
 	engineVersion string
 
 	// visionAvailable is what /v1/version reports for the third tier.
 	visionAvailable bool
 	visionEngine    string
+
+	// extractDelay stalls /v1/extract, so a test can put a response on the
+	// far side of one client's timeout and inside another's.
+	extractDelay time.Duration
 
 	extractStatus int
 	extractBody   any
@@ -48,6 +55,14 @@ type fakeService struct {
 	gotTier     string
 	gotFilename string
 	gotFileSize int
+}
+
+// setVisionEngine changes what /v1/version reports, as an operator swapping
+// the service's Tier 3 engine would.
+func (f *fakeService) setVisionEngine(name string) {
+	f.mu.Lock()
+	f.visionEngine = name
+	f.mu.Unlock()
 }
 
 func (f *fakeService) start(t *testing.T) string {
@@ -65,15 +80,21 @@ func (f *fakeService) start(t *testing.T) string {
 	}
 
 	mux.HandleFunc("GET /v1/version", func(w http.ResponseWriter, _ *http.Request) {
+		f.mu.Lock()
+		visionEngine := f.visionEngine
+		f.mu.Unlock()
 		writeJSON(w, 200, map[string]any{
 			"schema_version":   f.schemaVersion,
 			"engine":           "paddleocr",
 			"engine_version":   f.engineVersion,
 			"vision_available": f.visionAvailable,
-			"vision_engine":    f.visionEngine,
+			"vision_engine":    visionEngine,
 		})
 	})
 	mux.HandleFunc("POST /v1/extract", func(w http.ResponseWriter, r *http.Request) {
+		if f.extractDelay > 0 {
+			time.Sleep(f.extractDelay)
+		}
 		if err := r.ParseMultipartForm(32 << 20); err != nil {
 			writeJSON(w, 400, map[string]string{"kind": "malformed", "message": err.Error()})
 			return
