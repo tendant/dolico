@@ -38,30 +38,39 @@ vision = ["mineru[core]>=2.5,<4"]
 # GLM-OCR (Tier 3, the alternative engine). Selected with
 # DOLICO_VISION_ENGINE=glm-ocr; see docs/glm-ocr-tier-design.md.
 #
-# `layout` rather than `selfhosted`: the two differ only by pypdfium2, which
-# this service already depends on, and `layout` names what actually runs in
-# this process. The 0.9B VLM does not -- it is reached over HTTP at
-# DOLICO_VISION_URL, and without one the engine reports itself unavailable
-# rather than reaching for the vendor's cloud API.
+# Two extras, because what runs here depends entirely on where the page is
+# read, and the difference is a gigabyte.
 #
-# Not as light as that makes it sound: the layout stage is PP-DocLayoutV3 under
-# torch, so this extra costs roughly what the MinerU one does. GLM-OCR being
-# the smaller model is an argument about the box serving it, not about this
-# one.
-glm = ["glmocr[layout]>=0.1.5"]
+# `glm` is the cloud API (DOLICO_GLM_API_KEY): Zhipu does layout *and*
+# recognition, so nothing model-shaped runs in this process and the base
+# package is enough -- pillow, requests, pydantic, pymupdf and a few more.
+# Measured, not assumed: a venv with `glmocr` alone has no torch and no
+# transformers, and GlmOcr(mode="maas") constructs and reports MaaS mode. The
+# pipeline import that would pull them is lazy and only taken when self-hosted.
+glm = ["glmocr>=0.1.5"]
 
-# The two Tier 3 engines cannot share an environment, and this is where that
-# is enforced rather than discovered.
+# `glm-selfhosted` adds the layout stage, for pointing DOLICO_VISION_URL at
+# your own vLLM/SGLang/MLX/Ollama server. PP-DocLayoutV3 runs here then, under
+# torch, so this costs roughly what the MinerU extra does. `layout` rather than
+# `selfhosted` upstream: the two differ only by pypdfium2, which this service
+# already has.
+glm-selfhosted = ["glmocr[layout]>=0.1.5"]
+
+# MinerU and a *self-hosted* GLM-OCR cannot share an environment, and this is
+# where that is enforced rather than discovered.
 #
-# MinerU pins transformers>=4.57.3,<5.0.0; glmocr requires transformers>=5.3.0.
-# There is no version satisfying both, so resolving the extras together fails
-# outright -- which is the honest answer: a service runs one vision engine, and
-# DOLICO_VISION_ENGINE selects which one it was built with, not which one it
-# switches to at runtime. Declaring the conflict lets uv resolve each extra
-# separately and keeps one lockfile for both.
+# MinerU pins transformers>=4.57.3,<5.0.0; glmocr[layout] requires
+# transformers>=5.3.0. No version satisfies both, so resolving those two extras
+# together fails outright.
+#
+# The plain `glm` extra is not in this pair, and that is the point of splitting
+# them: the cloud path brings no transformers at all, so it conflicts with
+# nothing. An image can carry MinerU and cloud GLM-OCR at once --
+# DOLICO_VISION_ENGINE still picks which one Tier 3 uses, but the dependency
+# graph no longer forces the choice at build time.
 [tool.uv]
 conflicts = [
-    [{ extra = "vision" }, { extra = "glm" }],
+    [{ extra = "vision" }, { extra = "glm-selfhosted" }],
 ]
 
 [build-system]

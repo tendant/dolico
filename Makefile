@@ -255,7 +255,7 @@ OCR_EXTRAS ?=
 # `filter` and not `findstring`: findstring is a substring test, so an extra
 # named `visionary` would tag the image `-mineru`. filter matches whole words,
 # which is what an extras list is.
-OCR_VARIANT := $(if $(filter vision,$(OCR_EXTRAS)),-mineru,$(if $(filter glm,$(OCR_EXTRAS)),-glm,))
+OCR_VARIANT := $(if $(filter vision,$(OCR_EXTRAS)),-mineru,$(if $(filter glm glm-selfhosted,$(OCR_EXTRAS)),-glm,))
 
 ifneq ($(OCR_EXTRAS),)
 export OCR_EXTRAS

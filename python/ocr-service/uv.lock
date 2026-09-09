@@ -14,7 +14,7 @@ resolution-markers = [
     "(python_full_version < '3.12' and platform_machine != 'aarch64' and sys_platform == 'linux') or (python_full_version < '3.12' and sys_platform != 'darwin' and sys_platform != 'emscripten' and sys_platform != 'linux' and sys_platform != 'win32')",
 ]
 conflicts = [[
-    { package = "dolico-ocr", extra = "glm" },
+    { package = "dolico-ocr", extra = "glm-selfhosted" },
     { package = "dolico-ocr", extra = "vision" },
 ]]
 
@@ -24,7 +24,7 @@ version = "1.14.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "huggingface-hub", version = "0.36.2", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-10-dolico-ocr-vision'" },
-    { name = "huggingface-hub", version = "1.30.0", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-10-dolico-ocr-glm'" },
+    { name = "huggingface-hub", version = "1.30.0", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-10-dolico-ocr-glm-selfhosted'" },
     { name = "numpy" },
     { name = "packaging" },
     { name = "psutil" },
@@ -505,7 +505,10 @@ dev = [
     { name = "pytest" },
 ]
 glm = [
-    { name = "glmocr", extra = ["layout"], marker = "extra == 'extra-10-dolico-ocr-glm'" },
+    { name = "glmocr" },
+]
+glm-selfhosted = [
+    { name = "glmocr", extra = ["layout"], marker = "extra == 'extra-10-dolico-ocr-glm-selfhosted'" },
 ]
 structure = [
     { name = "paddlex", extra = ["ocr"] },
@@ -517,7 +520,8 @@ vision = [
 [package.metadata]
 requires-dist = [
     { name = "fastapi", specifier = ">=0.115" },
-    { name = "glmocr", extras = ["layout"], marker = "extra == 'glm'", specifier = ">=0.1.5" },
+    { name = "glmocr", marker = "extra == 'glm'", specifier = ">=0.1.5" },
+    { name = "glmocr", extras = ["layout"], marker = "extra == 'glm-selfhosted'", specifier = ">=0.1.5" },
     { name = "httpx", marker = "extra == 'dev'", specifier = ">=0.27" },
     { name = "mineru", extras = ["core"], marker = "extra == 'vision'", specifier = ">=2.5,<4" },
     { name = "numpy", specifier = ">=1.26" },
@@ -529,7 +533,7 @@ requires-dist = [
     { name = "python-multipart", specifier = ">=0.0.12" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.32" },
 ]
-provides-extras = ["dev", "structure", "vision", "glm"]
+provides-extras = ["dev", "structure", "vision", "glm", "glm-selfhosted"]
 
 [[package]]
 name = "einops"
@@ -931,7 +935,7 @@ resolution-markers = [
 dependencies = [
     { name = "filelock", marker = "extra == 'extra-10-dolico-ocr-vision'" },
     { name = "fsspec", marker = "extra == 'extra-10-dolico-ocr-vision'" },
-    { name = "hf-xet", marker = "(platform_machine == 'aarch64' and extra == 'extra-10-dolico-ocr-vision') or (platform_machine == 'amd64' and extra == 'extra-10-dolico-ocr-vision') or (platform_machine == 'arm64' and extra == 'extra-10-dolico-ocr-vision') or (platform_machine == 'x86_64' and extra == 'extra-10-dolico-ocr-vision') or (extra == 'extra-10-dolico-ocr-glm' and extra == 'extra-10-dolico-ocr-vision')" },
+    { name = "hf-xet", marker = "(platform_machine == 'aarch64' and extra == 'extra-10-dolico-ocr-vision') or (platform_machine == 'amd64' and extra == 'extra-10-dolico-ocr-vision') or (platform_machine == 'arm64' and extra == 'extra-10-dolico-ocr-vision') or (platform_machine == 'x86_64' and extra == 'extra-10-dolico-ocr-vision') or (extra == 'extra-10-dolico-ocr-glm-selfhosted' and extra == 'extra-10-dolico-ocr-vision')" },
     { name = "packaging", marker = "extra == 'extra-10-dolico-ocr-vision'" },
     { name = "pyyaml", marker = "extra == 'extra-10-dolico-ocr-vision'" },
     { name = "requests", marker = "extra == 'extra-10-dolico-ocr-vision'" },
@@ -960,15 +964,15 @@ resolution-markers = [
     "(python_full_version < '3.12' and platform_machine != 'aarch64' and sys_platform == 'linux') or (python_full_version < '3.12' and sys_platform != 'darwin' and sys_platform != 'emscripten' and sys_platform != 'linux' and sys_platform != 'win32')",
 ]
 dependencies = [
-    { name = "click", marker = "extra == 'extra-10-dolico-ocr-glm' or extra != 'extra-10-dolico-ocr-vision'" },
-    { name = "filelock", marker = "extra == 'extra-10-dolico-ocr-glm' or extra != 'extra-10-dolico-ocr-vision'" },
-    { name = "fsspec", marker = "extra == 'extra-10-dolico-ocr-glm' or extra != 'extra-10-dolico-ocr-vision'" },
-    { name = "hf-xet", marker = "(platform_machine == 'AMD64' and extra == 'extra-10-dolico-ocr-glm') or (platform_machine == 'AMD64' and extra != 'extra-10-dolico-ocr-vision') or (platform_machine == 'aarch64' and extra == 'extra-10-dolico-ocr-glm') or (platform_machine == 'aarch64' and extra != 'extra-10-dolico-ocr-vision') or (platform_machine == 'amd64' and extra == 'extra-10-dolico-ocr-glm') or (platform_machine == 'amd64' and extra != 'extra-10-dolico-ocr-vision') or (platform_machine == 'arm64' and extra == 'extra-10-dolico-ocr-glm') or (platform_machine == 'arm64' and extra != 'extra-10-dolico-ocr-vision') or (platform_machine == 'x86_64' and extra == 'extra-10-dolico-ocr-glm') or (platform_machine == 'x86_64' and extra != 'extra-10-dolico-ocr-vision') or (extra == 'extra-10-dolico-ocr-glm' and extra == 'extra-10-dolico-ocr-vision')" },
-    { name = "httpx", marker = "extra == 'extra-10-dolico-ocr-glm' or extra != 'extra-10-dolico-ocr-vision'" },
-    { name = "packaging", marker = "extra == 'extra-10-dolico-ocr-glm' or extra != 'extra-10-dolico-ocr-vision'" },
-    { name = "pyyaml", marker = "extra == 'extra-10-dolico-ocr-glm' or extra != 'extra-10-dolico-ocr-vision'" },
-    { name = "tqdm", marker = "extra == 'extra-10-dolico-ocr-glm' or extra != 'extra-10-dolico-ocr-vision'" },
-    { name = "typing-extensions", marker = "extra == 'extra-10-dolico-ocr-glm' or extra != 'extra-10-dolico-ocr-vision'" },
+    { name = "click", marker = "extra == 'extra-10-dolico-ocr-glm-selfhosted' or extra != 'extra-10-dolico-ocr-vision'" },
+    { name = "filelock", marker = "extra == 'extra-10-dolico-ocr-glm-selfhosted' or extra != 'extra-10-dolico-ocr-vision'" },
+    { name = "fsspec", marker = "extra == 'extra-10-dolico-ocr-glm-selfhosted' or extra != 'extra-10-dolico-ocr-vision'" },
+    { name = "hf-xet", marker = "(platform_machine == 'AMD64' and extra == 'extra-10-dolico-ocr-glm-selfhosted') or (platform_machine == 'AMD64' and extra != 'extra-10-dolico-ocr-vision') or (platform_machine == 'aarch64' and extra == 'extra-10-dolico-ocr-glm-selfhosted') or (platform_machine == 'aarch64' and extra != 'extra-10-dolico-ocr-vision') or (platform_machine == 'amd64' and extra == 'extra-10-dolico-ocr-glm-selfhosted') or (platform_machine == 'amd64' and extra != 'extra-10-dolico-ocr-vision') or (platform_machine == 'arm64' and extra == 'extra-10-dolico-ocr-glm-selfhosted') or (platform_machine == 'arm64' and extra != 'extra-10-dolico-ocr-vision') or (platform_machine == 'x86_64' and extra == 'extra-10-dolico-ocr-glm-selfhosted') or (platform_machine == 'x86_64' and extra != 'extra-10-dolico-ocr-vision') or (extra == 'extra-10-dolico-ocr-glm-selfhosted' and extra == 'extra-10-dolico-ocr-vision')" },
+    { name = "httpx", marker = "extra == 'extra-10-dolico-ocr-glm-selfhosted' or extra != 'extra-10-dolico-ocr-vision'" },
+    { name = "packaging", marker = "extra == 'extra-10-dolico-ocr-glm-selfhosted' or extra != 'extra-10-dolico-ocr-vision'" },
+    { name = "pyyaml", marker = "extra == 'extra-10-dolico-ocr-glm-selfhosted' or extra != 'extra-10-dolico-ocr-vision'" },
+    { name = "tqdm", marker = "extra == 'extra-10-dolico-ocr-glm-selfhosted' or extra != 'extra-10-dolico-ocr-vision'" },
+    { name = "typing-extensions", marker = "extra == 'extra-10-dolico-ocr-glm-selfhosted' or extra != 'extra-10-dolico-ocr-vision'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/35/97/2eb4abaa5b969ed385066a0496a3823b3ff467fc1082e2202955f1867d60/huggingface_hub-1.30.0.tar.gz", hash = "sha256:e6a6120bc8c8e2723d03648434ee247088cceb55ba7067e7d34d692cad5fdb57", size = 964291 }
 wheels = [
@@ -1799,7 +1803,7 @@ dependencies = [
     { name = "pillow" },
     { name = "protobuf" },
     { name = "safetensors" },
-    { name = "setuptools", marker = "python_full_version >= '3.12' or (extra == 'extra-10-dolico-ocr-glm' and extra == 'extra-10-dolico-ocr-vision')" },
+    { name = "setuptools", marker = "python_full_version >= '3.12' or (extra == 'extra-10-dolico-ocr-glm-selfhosted' and extra == 'extra-10-dolico-ocr-vision')" },
     { name = "typing-extensions" },
 ]
 wheels = [
@@ -1821,7 +1825,7 @@ dependencies = [
     { name = "colorlog" },
     { name = "filelock" },
     { name = "huggingface-hub", version = "0.36.2", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-10-dolico-ocr-vision'" },
-    { name = "huggingface-hub", version = "1.30.0", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-10-dolico-ocr-glm' or extra != 'extra-10-dolico-ocr-vision'" },
+    { name = "huggingface-hub", version = "1.30.0", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-10-dolico-ocr-glm-selfhosted' or extra != 'extra-10-dolico-ocr-vision'" },
     { name = "modelscope" },
     { name = "numpy" },
     { name = "packaging" },
@@ -1859,13 +1863,13 @@ ocr = [
     { name = "regex" },
     { name = "safetensors" },
     { name = "scikit-learn" },
-    { name = "scipy", version = "1.17.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12' or (extra == 'extra-10-dolico-ocr-glm' and extra == 'extra-10-dolico-ocr-vision')" },
-    { name = "scipy", version = "1.18.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12' or (extra == 'extra-10-dolico-ocr-glm' and extra == 'extra-10-dolico-ocr-vision')" },
+    { name = "scipy", version = "1.17.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12' or (extra == 'extra-10-dolico-ocr-glm-selfhosted' and extra == 'extra-10-dolico-ocr-vision')" },
+    { name = "scipy", version = "1.18.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12' or (extra == 'extra-10-dolico-ocr-glm-selfhosted' and extra == 'extra-10-dolico-ocr-vision')" },
     { name = "sentencepiece" },
     { name = "shapely" },
     { name = "tiktoken" },
     { name = "tokenizers", version = "0.22.2", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-10-dolico-ocr-vision'" },
-    { name = "tokenizers", version = "0.23.2", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-10-dolico-ocr-glm' or extra != 'extra-10-dolico-ocr-vision'" },
+    { name = "tokenizers", version = "0.23.2", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-10-dolico-ocr-glm-selfhosted' or extra != 'extra-10-dolico-ocr-vision'" },
 ]
 ocr-core = [
     { name = "imagesize" },
@@ -2302,7 +2306,7 @@ name = "pytest"
 version = "9.1.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "colorama", marker = "sys_platform == 'win32' or (extra == 'extra-10-dolico-ocr-glm' and extra == 'extra-10-dolico-ocr-vision')" },
+    { name = "colorama", marker = "sys_platform == 'win32' or (extra == 'extra-10-dolico-ocr-glm-selfhosted' and extra == 'extra-10-dolico-ocr-vision')" },
     { name = "iniconfig" },
     { name = "packaging" },
     { name = "pluggy" },
@@ -2587,8 +2591,8 @@ dependencies = [
     { name = "joblib" },
     { name = "narwhals" },
     { name = "numpy" },
-    { name = "scipy", version = "1.17.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12' or (extra == 'extra-10-dolico-ocr-glm' and extra == 'extra-10-dolico-ocr-vision')" },
-    { name = "scipy", version = "1.18.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12' or (extra == 'extra-10-dolico-ocr-glm' and extra == 'extra-10-dolico-ocr-vision')" },
+    { name = "scipy", version = "1.17.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12' or (extra == 'extra-10-dolico-ocr-glm-selfhosted' and extra == 'extra-10-dolico-ocr-vision')" },
+    { name = "scipy", version = "1.18.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12' or (extra == 'extra-10-dolico-ocr-glm-selfhosted' and extra == 'extra-10-dolico-ocr-vision')" },
     { name = "threadpoolctl" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/fa/6f/37092bdb25f712817231799fc5674d8e704066a8a70c1d2d40517e18b4ab/scikit_learn-1.9.0.tar.gz", hash = "sha256:8833266989d3a5110178a9fae30783675460724d0e1efb13b14901d2c660c557", size = 7750767 }
@@ -2619,7 +2623,7 @@ resolution-markers = [
     "(python_full_version < '3.12' and platform_machine != 'aarch64' and sys_platform == 'linux') or (python_full_version < '3.12' and sys_platform != 'darwin' and sys_platform != 'emscripten' and sys_platform != 'linux' and sys_platform != 'win32')",
 ]
 dependencies = [
-    { name = "numpy", marker = "python_full_version < '3.12' or (extra == 'extra-10-dolico-ocr-glm' and extra == 'extra-10-dolico-ocr-vision')" },
+    { name = "numpy", marker = "python_full_version < '3.12' or (extra == 'extra-10-dolico-ocr-glm-selfhosted' and extra == 'extra-10-dolico-ocr-vision')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/7a/97/5a3609c4f8d58b039179648e62dd220f89864f56f7357f5d4f45c29eb2cc/scipy-1.17.1.tar.gz", hash = "sha256:95d8e012d8cb8816c226aef832200b1d45109ed4464303e997c5b13122b297c0", size = 30573822 }
 wheels = [
@@ -2657,7 +2661,7 @@ resolution-markers = [
     "(python_full_version >= '3.12' and platform_machine != 'aarch64' and sys_platform == 'linux') or (python_full_version >= '3.12' and sys_platform != 'darwin' and sys_platform != 'emscripten' and sys_platform != 'linux' and sys_platform != 'win32')",
 ]
 dependencies = [
-    { name = "numpy", marker = "python_full_version >= '3.12' or (extra == 'extra-10-dolico-ocr-glm' and extra == 'extra-10-dolico-ocr-vision')" },
+    { name = "numpy", marker = "python_full_version >= '3.12' or (extra == 'extra-10-dolico-ocr-glm-selfhosted' and extra == 'extra-10-dolico-ocr-vision')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/a7/25/c2700dfaf6442b4effaa91af24ebce5dc9d31bb4a69706313aae70d72cd0/scipy-1.18.0.tar.gz", hash = "sha256:67b2ad2ad54c72ca6d04975a9b2df8c3638c34ddd5b28738e94fc2b57929d378", size = 30774447 }
 wheels = [
@@ -2928,7 +2932,7 @@ version = "2.13.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "cuda-bindings", marker = "sys_platform == 'linux'" },
-    { name = "cuda-toolkit", extra = ["cublas", "cudart", "cufft", "cufile", "cupti", "curand", "cusolver", "cusparse", "nvjitlink", "nvrtc", "nvtx"], marker = "(sys_platform == 'linux' and extra == 'extra-10-dolico-ocr-glm') or (sys_platform == 'linux' and extra == 'extra-10-dolico-ocr-vision') or (extra == 'extra-10-dolico-ocr-glm' and extra == 'extra-10-dolico-ocr-vision')" },
+    { name = "cuda-toolkit", extra = ["cublas", "cudart", "cufft", "cufile", "cupti", "curand", "cusolver", "cusparse", "nvjitlink", "nvrtc", "nvtx"], marker = "(sys_platform == 'linux' and extra == 'extra-10-dolico-ocr-glm-selfhosted') or (sys_platform == 'linux' and extra == 'extra-10-dolico-ocr-vision') or (extra == 'extra-10-dolico-ocr-glm-selfhosted' and extra == 'extra-10-dolico-ocr-vision')" },
     { name = "filelock" },
     { name = "fsspec" },
     { name = "jinja2" },
@@ -3175,7 +3179,7 @@ standard = [
     { name = "httptools" },
     { name = "python-dotenv" },
     { name = "pyyaml" },
-    { name = "uvloop", marker = "(platform_python_implementation != 'PyPy' and sys_platform != 'cygwin' and sys_platform != 'win32') or (platform_python_implementation == 'PyPy' and extra == 'extra-10-dolico-ocr-glm' and extra == 'extra-10-dolico-ocr-vision') or (sys_platform == 'cygwin' and extra == 'extra-10-dolico-ocr-glm' and extra == 'extra-10-dolico-ocr-vision') or (sys_platform == 'win32' and extra == 'extra-10-dolico-ocr-glm' and extra == 'extra-10-dolico-ocr-vision')" },
+    { name = "uvloop", marker = "(platform_python_implementation != 'PyPy' and sys_platform != 'cygwin' and sys_platform != 'win32') or (platform_python_implementation == 'PyPy' and extra == 'extra-10-dolico-ocr-glm-selfhosted' and extra == 'extra-10-dolico-ocr-vision') or (sys_platform == 'cygwin' and extra == 'extra-10-dolico-ocr-glm-selfhosted' and extra == 'extra-10-dolico-ocr-vision') or (sys_platform == 'win32' and extra == 'extra-10-dolico-ocr-glm-selfhosted' and extra == 'extra-10-dolico-ocr-vision')" },
     { name = "watchfiles" },
     { name = "websockets" },
 ]

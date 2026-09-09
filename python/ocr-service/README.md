@@ -187,16 +187,21 @@ Two things both OCR tiers provide that no other engine in the pipeline can:
 
 ### On which engine is in Tier 3
 
-Two implement the tier, and a service is **built** with one of them rather than
-switching between them: MinerU pins `transformers<5` and `glmocr` requires
-`transformers>=5.3`, so the two extras cannot be installed together.
-`DOLICO_VISION_ENGINE` names which one this build has.
+Two implement the tier, and a build carries one of them.
+`DOLICO_VISION_ENGINE` names which.
+
+`--extra glm` is the cloud path and it is nearly free: Zhipu does layout and
+recognition both, so no model runs here — no torch, no transformers, and the
+image stays about the size it is with no Tier 3 at all. `--extra vision`
+(MinerU) and `--extra glm-selfhosted` (GLM-OCR with the layout stage local) each
+add roughly a gigabyte of packages, and those two genuinely cannot coexist:
+MinerU pins `transformers<5` and `glmocr[layout]` needs `>=5.3`.
 
 | | `mineru` (default) | `glm-ocr` |
 | --- | --- | --- |
 | Model | MinerU2.5-Pro-2605-1.2B | GLM-OCR, 0.9B |
-| Extra | `--extra vision` | `--extra glm` |
-| Runs | in this process, or remote | layout here, the VLM always remote |
+| Extra | `--extra vision` | `--extra glm` (cloud) or `--extra glm-selfhosted` |
+| Runs | in this process, or remote | cloud: nothing here. self-hosted: layout here, VLM remote |
 | Endpoint | optional | **required** — no endpoint means the tier is unavailable |
 | Licence | Apache-2.0 + a commercial threshold | Apache-2.0 code, MIT weights |
 | Measured here | yes — mean CER 0.011 | **no** |

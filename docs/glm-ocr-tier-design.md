@@ -308,9 +308,20 @@ not about this one.
 Found by the resolver while implementing this, and it is the one thing here
 that changes a decision rather than describing one.
 
-MinerU pins `transformers>=4.57.3,<5.0.0`. `glmocr` requires
-`transformers>=5.3.0`. No version satisfies both, so resolving the two extras
-together fails outright.
+MinerU pins `transformers>=4.57.3,<5.0.0`. `glmocr[layout]` requires
+`transformers>=5.3.0`. No version satisfies both, so resolving those two
+extras together fails outright.
+
+*Narrowed after the fact:* this is only true of a **self-hosted** GLM-OCR. The
+cloud path needs none of it — Zhipu runs the layout model too, so base
+`glmocr` brings no torch and no transformers and conflicts with nothing.
+Verified rather than reasoned: a venv with `glmocr` alone has neither, and
+`GlmOcr(mode="maas")` constructs and reports MaaS mode. Hence two extras,
+`glm` and `glm-selfhosted`, and only the second is in the conflict pair. The
+first also keeps the OCR image roughly the size it is with no Tier 3 at all,
+which matters rather more than the tidiness: the deployment that wanted this
+runs one OCR worker on a host where the MinerU extra would have tripled the
+image for a model it never loads.
 
 Upgrading MinerU does not fix it. Every release carries that pin, including the
 4.0 pre-release, so this is a standing disagreement between the two projects
