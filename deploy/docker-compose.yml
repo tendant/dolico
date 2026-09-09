@@ -30,11 +30,22 @@ services:
     # registry is hardcoded here: this repository is public, and one written in
     # would be both wrong for most readers and a standing invitation to push
     # somewhere by accident.
-    image: ${DOLICO_REGISTRY:+${DOLICO_REGISTRY}/}dolico-ocr:${DOLICO_TAG:-latest}
+    # OCR_VARIANT keeps two Tier 3 engines built from one commit off the same
+    # tag: `make image OCR_EXTRAS="structure glm"` sets it to `-glm`. Pulling a
+    # prebuilt image instead? Put the whole thing in DOLICO_TAG and leave this
+    # unset.
+    image: ${DOLICO_REGISTRY:+${DOLICO_REGISTRY}/}dolico-ocr:${DOLICO_TAG:-latest}${OCR_VARIANT:-}
     build:
       context: ..
       dockerfile: deploy/Dockerfile.ocr
       args:
+        # Which tiers this image carries. "structure" is Tier 2 alone; add
+        # "vision" for Tier 3 with MinerU or "glm" for Tier 3 with GLM-OCR.
+        # Not both -- their dependencies are mutually unsatisfiable, and the
+        # build refuses rather than failing deep inside the resolver. The image
+        # remembers which one it has, so the ocr service needs no matching
+        # DOLICO_VISION_ENGINE here.
+        OCR_EXTRAS: ${OCR_EXTRAS:-structure}
         # Empty unless set in the environment or deploy/.env. Nothing is
         # committed with a value -- see deploy/README.md, "Building behind a
         # slow index".

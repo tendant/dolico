@@ -1,6 +1,6 @@
 .PHONY: help build build-go build-rust run run-ocr run-vision ocr ocr-text ocr-vision \
-        test test-go test-rust test-ocr lint fmt e2e e2e-ocr e2e-vision bench bench-ocr \
-        bench-vision bench-hard testdata clean clean-ocr \
+        ocr-glm test test-go test-rust test-ocr lint fmt e2e e2e-ocr e2e-vision bench bench-ocr \
+        bench-vision bench-glm bench-hard testdata clean clean-ocr \
         image up down logs config verify compose-check push login registry-check
 
 # Caches live inside the repo so a build never depends on, or pollutes, the
@@ -16,6 +16,10 @@ OCR_DIR := python/ocr-service
 OCR_HOST ?= 127.0.0.1
 OCR_PORT ?= 8181
 OCR_URL ?= http://$(OCR_HOST):$(OCR_PORT)
+# Where `make ocr-glm` finds the GLM-OCR model. Nothing else uses it, and the
+# service refuses to start the engine without it.
+GLM_URL ?= http://127.0.0.1:8080
+
 # The tier `make ocr` starts. Use EXPECT_OCR=paddleocr with `make ocr-text`.
 EXPECT_OCR ?= pp-structurev3
 # OCR worker processes. Each costs 2.5-3GB once warm; see the `ocr` target.
@@ -52,6 +56,8 @@ help:
 	@echo "  e2e-vision   End-to-end sweep asserting faded.pdf escalated and was recovered"
 	@echo "  bench-vision Score extraction with all three tiers"
 	@echo "  bench-hard   Score the real-scan corpus in testdata/corpus-hard"
+	@echo "  ocr-glm      Run the OCR service with GLM-OCR as Tier 3 instead"
+	@echo "  bench-glm    Score extraction with GLM-OCR in the vision tier"
 	@echo ""
 	@echo "Deployment (two containers, loopback only -- see deploy/README.md):"
 	@echo "  image       Build both images as $(REGISTRY_PREFIX)dolico-{api,ocr}:$(DOLICO_TAG)"
@@ -116,6 +122,14 @@ bench-ocr: build
 # The pair that gives Tier 3 a number: run this against `make bench-ocr` on the
 # same corpus and compare the faded.pdf row.
 bench-vision: build
+	@DOLICO_OCR_URL=$(OCR_URL) DOLICO_VISION_ENABLED=1 ./scripts/bench.sh $(BENCH_ARGS)
+
+# The same corpus through the other Tier 3 engine. Requires `make ocr-glm`.
+#
+# Run this against `make bench-vision` on the same corpus: the API server does
+# not know or care which engine the service has in its Tier 3 slot, so the two
+# runs differ in exactly one thing and the CER columns are comparable.
+bench-glm: build
 	@DOLICO_OCR_URL=$(OCR_URL) DOLICO_VISION_ENABLED=1 ./scripts/bench.sh $(BENCH_ARGS)
 
 # Real scans, whose ground truth is transcribed rather than generated. Kept out
@@ -226,8 +240,32 @@ export DEBIAN_MIRROR
 endif
 
 REGISTRY_PREFIX := $(if $(DOLICO_REGISTRY),$(DOLICO_REGISTRY)/,)
+
+# Which tiers the OCR image carries. Empty here rather than `structure`, which
+# is the Dockerfile's own default: exporting a value unconditionally would
+# override a deploy/.env that sets it, for the same reason the mirrors below
+# are exported only when they have one.
+OCR_EXTRAS ?=
+
+# The engine goes in the tag, because two images built from the same commit
+# with different Tier 3 engines are different images. Sharing a tag would mean
+# the second build silently replacing the first, with nothing in `docker
+# images` to say which one is there. Tier-2-only builds keep the bare tag they
+# have always had.
+# `filter` and not `findstring`: findstring is a substring test, so an extra
+# named `visionary` would tag the image `-mineru`. filter matches whole words,
+# which is what an extras list is.
+OCR_VARIANT := $(if $(filter vision,$(OCR_EXTRAS)),-mineru,$(if $(filter glm,$(OCR_EXTRAS)),-glm,))
+
+ifneq ($(OCR_EXTRAS),)
+export OCR_EXTRAS
+endif
+ifneq ($(OCR_VARIANT),)
+export OCR_VARIANT
+endif
+
 IMAGE_API := $(REGISTRY_PREFIX)dolico-api:$(DOLICO_TAG)
-IMAGE_OCR := $(REGISTRY_PREFIX)dolico-ocr:$(DOLICO_TAG)
+IMAGE_OCR := $(REGISTRY_PREFIX)dolico-ocr:$(DOLICO_TAG)$(OCR_VARIANT)
 
 # --pull by default: a base image left in the local store goes stale, and a
 # stale Debian base fails `apt-get update` with NO_PUBKEY once the archive is
@@ -403,6 +441,21 @@ ocr-vision:
 		--extra structure --extra vision \
 		uvicorn dolico_ocr.app:app --host $(OCR_HOST) --port $(OCR_PORT) \
 		--workers $(OCR_WORKERS)
+
+# The other Tier 3 engine. Same service, same port, same escalation rules --
+# only the model that reads an escalated page differs.
+#
+# It needs a GLM-OCR endpoint to talk to and will not start without one:
+# DOLICO_VISION_URL points at a vLLM, SGLang, MLX or Ollama server serving the
+# 0.9B VLM. Only the layout stage runs in this process. Unconfigured, the tier
+# reports itself unavailable rather than falling back to the vendor's cloud
+# API, which is what the library would do on its own.
+#
+# Unmeasured on this repository's corpus. `make bench-glm` against
+# `make bench-vision` is the comparison that would settle whether it belongs
+# here -- see docs/glm-ocr-tier-design.md.
+ocr-glm:
+	@DOLICO_OCR_WORKERS=$(OCR_WORKERS) DOLICO_VISION_ENGINE=glm-ocr 		DOLICO_VISION_URL=$(GLM_URL) $(UV) run --project $(OCR_DIR) 		--extra structure --extra glm 		uvicorn dolico_ocr.app:app --host $(OCR_HOST) --port $(OCR_PORT) 		--workers $(OCR_WORKERS)
 
 # Requires a service started with `make ocr-vision`; against a plain `make ocr`
 # the server logs that MinerU is absent and runs with two tiers.

@@ -14,6 +14,14 @@
 # because the disagreement probe keeps MinerU resident for every document
 # with a scanned page.
 #
+# There are two Tier 3 engines and an image holds at most one of them:
+# OCR_EXTRAS="structure vision" builds MinerU, "structure glm" builds GLM-OCR.
+# They cannot be combined -- MinerU pins transformers<5 and glmocr requires
+# >=5.3 -- so asking for both is refused below rather than left to fail deep
+# inside dependency resolution. The image records which one it has in
+# DOLICO_VISION_ENGINE, so the running service does not have to be told
+# separately what was built into it.
+#
 # **This image is amd64 only.** PaddlePaddle ships no Linux aarch64 wheels --
 # checked against PyPI, which has manylinux1_x86_64, macosx_11_0_arm64 and
 # win_amd64 and nothing else. The compose file pins the platform accordingly;
@@ -52,6 +60,38 @@ WORKDIR /app
 
 # Dependencies first, so that editing the service does not reinstall Paddle.
 ARG OCR_EXTRAS="structure"
+
+# Which Tier 3 engine the extras asked for, derived rather than passed: a
+# second argument could disagree with the first, and an image built with
+# GLM-OCR installed but MinerU configured would report its vision tier
+# unavailable and quietly serve two tiers.
+# Empty means no Tier 3 in this image. It has to be empty rather than a word
+# like "none", because the value is exported as DOLICO_VISION_ENGINE and
+# `dolico_ocr.vision` refuses to start on a name it does not implement.
+# Each extra is tested on its own rather than in one combined pattern. A
+# pattern like *" vision "*" glm "* does not match "structure vision glm":
+# the two extras share the space between them, and matching " vision "
+# consumes it, so the " glm " that follows no longer has its leading space.
+# That is the one input this check exists to catch, so it gets its own test.
+RUN set -e; \
+    padded=" $OCR_EXTRAS "; \
+    has_vision=; has_glm=; \
+    case "$padded" in *" vision "*) has_vision=1;; esac; \
+    case "$padded" in *" glm "*)    has_glm=1;; esac; \
+    if [ -n "$has_vision" ] && [ -n "$has_glm" ]; then \
+        echo "OCR_EXTRAS names both vision and glm: $OCR_EXTRAS"; \
+        echo "An image holds one Tier 3 engine: MinerU pins transformers<5,"; \
+        echo "glmocr requires >=5.3, and no version satisfies both."; \
+        exit 1; \
+    elif [ -n "$has_vision" ]; then printf mineru  > /app/.vision-engine; \
+    elif [ -n "$has_glm" ];    then printf glm-ocr > /app/.vision-engine; \
+    else                            printf ''      > /app/.vision-engine; \
+    fi; \
+    if [ -s /app/.vision-engine ]; then \
+        echo "Tier 3 engine: $(cat /app/.vision-engine)"; \
+    else \
+        echo "Tier 3 engine: none"; \
+    fi
 
 # Optional PyPI mirrors, for networks where upstream is slow or blocked. Both
 # are empty by default and no value is committed -- see deploy/README.md.
@@ -107,5 +147,11 @@ HEALTHCHECK --interval=15s --timeout=5s --start-period=180s --retries=5 \
 
 # exec so uvicorn is PID 1 and receives SIGTERM; shell form so the worker count
 # stays a single environment variable rather than a rebuild.
+# The engine comes from the build unless the environment overrides it, which
+# is the only sane precedence: the image knows what was installed in it, and an
+# operator who overrides it gets what they asked for -- including the refusal,
+# if they name an engine this image does not carry.
 CMD ["/bin/sh", "-c", \
-     "exec uvicorn dolico_ocr.app:app --host 0.0.0.0 --port 8181 --workers ${DOLICO_OCR_WORKERS}"]
+     "V=${DOLICO_VISION_ENGINE:-$(cat /app/.vision-engine)}; \
+      [ -n \"$V\" ] && export DOLICO_VISION_ENGINE=\"$V\"; \
+      exec uvicorn dolico_ocr.app:app --host 0.0.0.0 --port 8181 --workers ${DOLICO_OCR_WORKERS}"]
