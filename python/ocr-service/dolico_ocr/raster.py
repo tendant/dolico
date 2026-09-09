@@ -121,6 +121,51 @@ def render_pdf_pages(
         doc.close()
 
 
+def image_to_pdf(data: bytes) -> bytes:
+    """Wrap a standalone image as a one-page PDF.
+
+    The vision tier's contract is PDF bytes, because MinerU opens the document
+    itself and has no image entry point. That is fine for the PDFs this service
+    was first pointed at and useless for the ones it actually receives: the
+    caller in production uploads photographs, every one of which the tier
+    refused with "reads PDFs only" while the OCR result stood.
+
+    One page at 72 DPI, one pixel to one point -- the same convention
+    `wrap_image` uses, so a page that reaches Tier 3 this way reports the same
+    geometry it would have reported from Tier 1 or 2, and the bounding boxes
+    still land on the image the caller sent.
+
+    The decode bound from `wrap_image` applies for the same reason it applies
+    there: an unbounded phone photo is how one upload takes the service down.
+    """
+    try:
+        import io
+
+        from PIL import Image
+
+        with Image.open(io.BytesIO(data)) as img:
+            width, height = img.size
+            if width * height > MAX_DECODE_PIXELS:
+                raise RasterError(
+                    f"image is {width}x{height}; the limit is "
+                    f"{MAX_DECODE_PIXELS // 1_000_000}MP"
+                )
+            target = _fit(width, height, MAX_OCR_PIXELS)
+            img.draft("RGB", target)
+            rgb = img.convert("RGB")
+            if rgb.size != target and rgb.width * rgb.height > MAX_OCR_PIXELS:
+                rgb = rgb.resize(target, Image.Resampling.LANCZOS)
+            out = io.BytesIO()
+            # resolution=72 keeps one pixel one point, which is what makes the
+            # page size match wrap_image's.
+            rgb.save(out, format="PDF", resolution=72.0)
+            return out.getvalue()
+    except RasterError:
+        raise
+    except Exception as exc:
+        raise RasterError(f"cannot convert image to PDF: {exc}") from exc
+
+
 def wrap_image(data: bytes) -> list[RasteredPage]:
     """Treat a standalone image as a single page.
 

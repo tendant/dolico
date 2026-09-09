@@ -78,7 +78,9 @@ pages the other one produced rather than silently mixing them.
 `tier=vision` routes the request to Tier 3 instead, which answers as engine
 `mineru` with its own version. It requires explicit page numbers — Tier 3 is a
 per-page escalation, and a whole-document vision request is almost always a
-mistake, so it is refused with a 400 rather than served. A page the vision
+mistake, so it is refused with a 400 rather than served. A standalone image is
+wrapped as a one-page PDF rather than refused: the adapters take PDF bytes, but
+the documents that reach this tier in practice are photographs. A page the vision
 model fails on is skipped and the rest are returned; a request where *every*
 page failed is a 422. `vision_available` is advertised separately from the OCR
 tier so a client can decide whether Tier 3 exists without attempting it.

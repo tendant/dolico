@@ -28,7 +28,7 @@ from .canonical import (
 )
 from .engine import OCREngine
 from .layout import group_lines
-from .raster import DEFAULT_DPI, RasterError, is_pdf, render_pdf_pages, wrap_image
+from .raster import DEFAULT_DPI, RasterError, image_to_pdf, is_pdf, render_pdf_pages, wrap_image
 from .structure import StructureEngine
 from .vision_base import VisionError
 
@@ -246,14 +246,31 @@ async def _extract_vision(data: bytes, wanted: list[int] | None, started: float)
             "unavailable",
             f"the vision tier ({vision_mod.ENGINE_NAME}) is not available here",
         )
-    if not is_pdf(data):
-        return _error(415, "unsupported", "the vision tier reads PDFs only")
     if not wanted:
         return _error(
             400,
             "malformed",
             "the vision tier extracts named pages only; pass `pages`",
         )
+
+    # A standalone image is wrapped as a one-page PDF rather than refused.
+    #
+    # The tier used to answer 415 here, inherited from MinerU having no image
+    # entry point, and it made the tier useless for the traffic that actually
+    # arrives: the production caller uploads photographs, so every escalation
+    # failed and the OCR result stood. Converting costs one Pillow save and
+    # keeps the adapters' contract -- PDF bytes -- exactly as it was.
+    if not is_pdf(data):
+        if wanted != [1]:
+            return _error(
+                400,
+                "malformed",
+                f"an image is a single page; asked for {wanted}",
+            )
+        try:
+            data = image_to_pdf(data)
+        except RasterError as exc:
+            return _error(415, "unsupported", str(exc))
 
     pages_out = []
     for number in wanted:

@@ -385,9 +385,35 @@ class TestVisionTier:
         resp = self.post(vision_client, pages="1")
         assert resp.status_code == 422
 
-    def test_non_pdf_input_is_rejected(self, vision_client):
-        resp = self.post(vision_client, name="x.png", data=b"\x89PNG\r\n\x1a\n")
+    def test_an_image_is_read_rather_than_refused(self, vision_client):
+        # The tier used to answer 415 for anything but a PDF, which made it
+        # useless for the traffic that actually arrives: the production caller
+        # uploads photographs, so every escalation failed and the OCR result
+        # stood. An image is now wrapped as a one-page PDF.
+        import io
+
+        from PIL import Image
+
+        buf = io.BytesIO()
+        Image.new("RGB", (200, 120), (30, 30, 30)).save(buf, format="PNG")
+        resp = self.post(vision_client, pages="1", name="scan.png", data=buf.getvalue())
+        assert resp.status_code == 200, resp.text[:200]
+        assert vision_client.fake.calls == [1]
+
+    def test_undecodable_image_bytes_are_still_refused(self, vision_client):
+        resp = self.post(vision_client, name="x.png", data=b"\x89PNG\r\n\x1a\nnot really")
         assert resp.status_code == 415
+
+    def test_an_image_is_a_single_page(self, vision_client):
+        import io
+
+        from PIL import Image
+
+        buf = io.BytesIO()
+        Image.new("RGB", (80, 80), (0, 0, 0)).save(buf, format="PNG")
+        resp = self.post(vision_client, pages="2,3", name="scan.png", data=buf.getvalue())
+        assert resp.status_code == 400
+        assert vision_client.fake.calls == []
 
     def test_unavailable_when_the_vision_engine_is_not_installed(
         self, vision_client, monkeypatch

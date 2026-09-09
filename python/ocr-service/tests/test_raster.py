@@ -211,3 +211,45 @@ class TestWrapImageBounds:
         Image.new("L", (10000, 10000), 0).save(buf, format="PNG")
         with pytest.raises(RasterError, match="MP"):
             wrap_image(buf.getvalue())
+
+
+class TestImageToPDF:
+    """The vision tier takes PDF bytes, and production uploads photographs."""
+
+    def _png(self, w=200, h=120, colour=(20, 30, 40)):
+        import io
+
+        from PIL import Image
+
+        buf = io.BytesIO()
+        Image.new("RGB", (w, h), colour).save(buf, format="PNG")
+        return buf.getvalue()
+
+    def test_an_image_becomes_a_one_page_pdf(self):
+        from dolico_ocr.raster import image_to_pdf, is_pdf, render_pdf_pages
+
+        pdf = image_to_pdf(self._png())
+        assert is_pdf(pdf)
+        pages = render_pdf_pages(pdf, [1], 72)
+        assert len(pages) == 1
+
+    def test_the_page_is_one_point_per_pixel(self):
+        # The same convention wrap_image uses, so a page that reaches Tier 3
+        # this way reports the geometry it would have reported from Tier 1.
+        from dolico_ocr.raster import image_to_pdf, render_pdf_pages
+
+        page = render_pdf_pages(image_to_pdf(self._png(200, 120)), [1], 72)[0]
+        assert page.width_pt == pytest.approx(200, abs=1)
+        assert page.height_pt == pytest.approx(120, abs=1)
+
+    def test_an_absurd_image_is_refused_rather_than_converted(self):
+        from dolico_ocr.raster import RasterError, image_to_pdf
+
+        with pytest.raises(RasterError, match="the limit is"):
+            image_to_pdf(self._png(12000, 12000))
+
+    def test_junk_is_a_raster_error_not_a_crash(self):
+        from dolico_ocr.raster import RasterError, image_to_pdf
+
+        with pytest.raises(RasterError, match="cannot convert"):
+            image_to_pdf(b"not an image at all")
