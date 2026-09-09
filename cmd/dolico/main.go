@@ -328,12 +328,32 @@ func visionEngine(cfg *config.Config, ocr engine.Engine, log *slog.Logger) engin
 	}
 	v := paddleocr.NewVision(client)
 	if v == nil {
-		log.Warn("vision tier requested but the OCR service reports MinerU is not installed; " +
-			"run `uv sync --extra vision` in python/ocr-service")
+		// Name the engine the service is configured for, not the one this
+		// binary was written against. The tier has two, they install through
+		// different extras, and an operator who set DOLICO_VISION_ENGINE=glm-ocr
+		// is not helped by being told to install MinerU.
+		//
+		// This is the whole diagnosis for a deployment that looks healthy and
+		// silently serves two tiers: enabling the tier and building the image
+		// that carries it are separate decisions in separate places.
+		want := client.VisionEngineName()
+		extra := "vision"
+		if want == "" {
+			want = paddleocr.DefaultVisionName
+		}
+		if want != paddleocr.DefaultVisionName {
+			extra = "glm"
+		}
+		log.Warn("vision tier requested but the OCR service has no Tier 3 engine; "+
+			"running with two tiers",
+			"configured_engine", want,
+			"remedy", fmt.Sprintf(
+				"build the OCR service with `--extra %s` (OCR_EXTRAS=\"structure %s\")",
+				extra, extra))
 		return nil
 	}
-	// No version here: MinerU loads on first use, so the service cannot report
-	// one yet. It appears in provenance once a page has actually been read.
+	// No version here: the vision model loads on first use, so the service
+	// cannot report one yet. It appears in provenance once a page is read.
 	log.Info("vision tier connected",
 		"engine", v.Name(),
 		"threshold", cfg.VisionThreshold,
