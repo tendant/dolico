@@ -82,7 +82,15 @@ WORKDIR /app
 # has already been initialized", which says nothing about permissions.
 RUN chown dolico:dolico /app \
     && mkdir -p /home/dolico/.paddlex \
-    && chown dolico:dolico /home/dolico/.paddlex
+    && chown dolico:dolico /home/dolico/.paddlex \
+    # And the vision tier's weight cache, for exactly the same reason. A
+    # deployment that mounts a volume here gets it root-owned unless the
+    # directory exists in the image first, and the failure is not a permission
+    # error: HuggingFace reports "cannot find the appropriate snapshot folder
+    # for the specified revision ... check your internet connection", which
+    # sends you looking at the network.
+    && mkdir -p /home/dolico/.cache/huggingface \
+    && chown -R dolico:dolico /home/dolico/.cache
 
 USER dolico
 # Before the first uv invocation, so its cache lands in this user's home rather
