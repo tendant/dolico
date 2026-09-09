@@ -254,7 +254,8 @@ its own change with its own number attached.
 | `DOLICO_VISION_URL` | unset | the remote VLM endpoint; generalizes `DOLICO_MINERU_URL`, which stays as a deprecated alias |
 | `DOLICO_GLM_MODEL` | `glm-ocr` | the served model name, which differs per backend (`mlx-community/GLM-OCR-bf16` for MLX, `glm-ocr:latest` for Ollama) |
 | `DOLICO_GLM_LAYOUT_DEVICE` | `cpu` | where PP-DocLayoutV3 runs |
-| `DOLICO_GLM_API_MODE` | `openai` | `ollama_generate` for an Ollama that 502s on vision requests to its OpenAI-compatible path |
+| `DOLICO_GLM_API_MODE` | `openai` | `ollama_generate` for Ollama, whose OpenAI-compatible path 502s on vision requests |
+| — | — | the endpoint path comes from `DOLICO_VISION_URL` when it carries one, else from the mode. MLX serves the OpenAI API without the `/v1` prefix, so it needs the explicit form. |
 | `DOLICO_GLM_DPI` | the service's own | render DPI for pages handed to GLM-OCR |
 
 `DOLICO_VISION_ENABLED`, `DOLICO_VISION_THRESHOLD`, `DOLICO_VISION_MAX_PAGES`,

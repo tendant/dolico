@@ -181,7 +181,7 @@ Two things both OCR tiers provide that no other engine in the pipeline can:
 | `DOLICO_MINERU_URL` | unset | the old name for `DOLICO_VISION_URL`; still honored |
 | `DOLICO_GLM_MODEL` | `glm-ocr` | the model name the GLM-OCR endpoint answers to |
 | `DOLICO_GLM_LAYOUT_DEVICE` | `cpu` | where PP-DocLayoutV3 runs |
-| `DOLICO_GLM_API_MODE` | `openai` | `ollama_generate` for an Ollama that 502s on vision requests |
+| `DOLICO_GLM_API_MODE` | `openai` | `ollama_generate` for Ollama, whose OpenAI-compatible path 502s on vision requests |
 | `DOLICO_GLM_DPI` | `200` | render DPI for pages sent to GLM-OCR |
 
 ### On which engine is in Tier 3
@@ -203,6 +203,20 @@ switching between them: MinerU pins `transformers<5` and `glmocr` requires
 The default is the measured one and should stay that way until `make bench-glm`
 says otherwise. `docs/glm-ocr-tier-design.md` has the comparison that would
 settle it, with an empty column.
+
+No two backends serve the model at the same path, so `DOLICO_VISION_URL` is
+where that is settled:
+
+| Serving it with | `DOLICO_VISION_URL` | also set |
+| --- | --- | --- |
+| vLLM or SGLang | `http://host:8000` | — |
+| `mlx_vlm.server` (Apple Silicon) | `http://127.0.0.1:8080/chat/completions` | `DOLICO_GLM_MODEL=mlx-community/GLM-OCR-bf16` |
+| Ollama | `http://127.0.0.1:11434` | `DOLICO_GLM_API_MODE=ollama_generate`, `DOLICO_GLM_MODEL=glm-ocr:latest` |
+
+A path on the URL is used verbatim; without one, the path is `/api/generate`
+for `ollama_generate` and `/v1/chat/completions` otherwise. MLX needs the
+explicit form because it serves the OpenAI API without the `/v1` prefix, and
+nothing in a request reveals that — it just 404s.
 
 GLM-OCR refuses to start without `DOLICO_VISION_URL`. That is deliberate: the
 library's own default is to post documents to a vendor cloud API, and every

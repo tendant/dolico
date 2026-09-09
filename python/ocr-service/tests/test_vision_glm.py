@@ -267,6 +267,42 @@ class TestConfiguration:
         assert dotted["pipeline.ocr_api.api_mode"] == "ollama_generate"
 
 
+class TestEndpointPath:
+    """No two backends serve the model at the same path."""
+
+    def test_vllm_and_sglang_get_the_openai_path(self, monkeypatch):
+        monkeypatch.setenv("DOLICO_VISION_URL", "http://ocr.internal:8000")
+        monkeypatch.delenv("DOLICO_GLM_API_MODE", raising=False)
+        dotted = GlmEngine()._config()["_dotted"]
+        assert dotted["pipeline.ocr_api.api_path"] == "/v1/chat/completions"
+
+    def test_ollama_gets_its_native_endpoint(self, monkeypatch):
+        # Setting the mode without the path would post vision requests to
+        # /v1/chat/completions, which is the 502 the Ollama guide warns about.
+        monkeypatch.setenv("DOLICO_VISION_URL", "http://127.0.0.1:11434")
+        monkeypatch.setenv("DOLICO_GLM_API_MODE", "ollama_generate")
+        dotted = GlmEngine()._config()["_dotted"]
+        assert dotted["pipeline.ocr_api.api_path"] == "/api/generate"
+
+    def test_a_path_on_the_url_wins(self, monkeypatch):
+        # mlx_vlm.server serves the OpenAI API without the /v1 prefix. Nothing
+        # in the request says so, so the endpoint has to carry it.
+        monkeypatch.setenv("DOLICO_VISION_URL", "http://127.0.0.1:8080/chat/completions")
+        monkeypatch.delenv("DOLICO_GLM_API_MODE", raising=False)
+        config = GlmEngine()._config()
+        assert config["_dotted"]["pipeline.ocr_api.api_path"] == "/chat/completions"
+        # The path must not have eaten the host or the port.
+        assert config["ocr_api_host"] == "127.0.0.1"
+        assert config["ocr_api_port"] == 8080
+
+    @pytest.mark.parametrize("url", ["http://h:8000", "http://h:8000/"])
+    def test_a_bare_host_is_not_a_path(self, monkeypatch, url):
+        monkeypatch.setenv("DOLICO_VISION_URL", url)
+        monkeypatch.delenv("DOLICO_GLM_API_MODE", raising=False)
+        dotted = GlmEngine()._config()["_dotted"]
+        assert dotted["pipeline.ocr_api.api_path"] == "/v1/chat/completions"
+
+
 class TestAvailability:
     def test_unavailable_without_an_endpoint(self, monkeypatch):
         # Installed but unconfigured is not available: glmocr with no endpoint

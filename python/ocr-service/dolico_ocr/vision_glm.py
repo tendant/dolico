@@ -52,6 +52,19 @@ DEFAULT_MODEL = "glm-ocr"
 # here to give it. Where there is one, it is wanted for the VLM.
 DEFAULT_LAYOUT_DEVICE = "cpu"
 
+# Where the request goes, which is not the same on any two backends:
+#
+#   vLLM, SGLang    /v1/chat/completions   OpenAI-compatible, glmocr's default
+#   mlx_vlm.server  /chat/completions      the same API without the /v1 prefix
+#   Ollama          /api/generate          its native endpoint; the
+#                                          OpenAI-compatible one 502s on vision
+#
+# Only the last is derivable, because it comes with `api_mode`. The MLX path
+# differs from the default by three characters and nothing in the request says
+# so, so it is taken from DOLICO_VISION_URL: give that variable a path and it
+# is used verbatim.
+API_PATHS = {"ollama_generate": "/api/generate", "openai": "/v1/chat/completions"}
+
 # A leading run of `#` on a title region, which `_format_content` adds
 # unconditionally. The level comes from the native label, not from counting
 # these: reading the level back out of the syntax would make canonical
@@ -161,6 +174,12 @@ class GlmEngine:
                 f"DOLICO_VISION_URL is not a usable URL: {self.server_url!r}"
             )
         port = url.port or (443 if url.scheme == "https" else 80)
+        # A path on the endpoint wins, because the caller wrote it down. "/" is
+        # what a bare host URL parses to and means nothing, so it does not
+        # count as one.
+        path = url.path if url.path not in ("", "/") else API_PATHS.get(
+            self.api_mode, API_PATHS["openai"]
+        )
 
         return {
             # Not a default worth inheriting. See the module docstring.
@@ -174,6 +193,7 @@ class GlmEngine:
                 # wrong for TLS on anything but 443.
                 "pipeline.ocr_api.api_scheme": url.scheme or "http",
                 "pipeline.ocr_api.api_mode": self.api_mode,
+                "pipeline.ocr_api.api_path": path,
                 # Leave the document's own bullets alone. This switch rewrites
                 # a leading `·` or `•` into Markdown's `- `, which would put
                 # rendering syntax into a canonical text field -- the two
