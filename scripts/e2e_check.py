@@ -34,6 +34,11 @@ EXPECT_OCR = os.environ.get("DOLICO_EXPECT_OCR", "")
 
 # Whether the server under test has the vision tier enabled. Unset means the
 # sweep does not assert on Tier 3 at all; `make e2e-vision` sets it.
+#
+# It may also name the engine -- DOLICO_EXPECT_VISION=glm-ocr -- which asserts
+# that *that* engine did the reading. A bare 1 accepts whichever engine the
+# service says is in the slot, which is the useful default: the tier has more
+# than one, and which one a deployment carries is its business.
 EXPECT_VISION = os.environ.get("DOLICO_EXPECT_VISION", "")
 
 PASS, FAIL = "\033[32mPASS\033[0m", "\033[31mFAIL\033[0m"
@@ -82,7 +87,13 @@ def engines_used(doc: dict) -> set[str]:
 # Each fixture, and what routing must do with it. The PDFs are the interesting
 # rows: they are what the per-page routing design exists for.
 OCR_ENGINES = {"ocr-stub", "paddleocr", "pp-structurev3"}
-VISION = "mineru"
+
+# Everything this service can report that is not the vision tier. Tier 3 is
+# identified by elimination against this set rather than by name, because it
+# has two engines -- mineru and glm-ocr -- and a sweep that hardcodes one
+# fails against a deployment running the other while reporting it as a broken
+# vision tier rather than as its own stale assumption.
+NON_VISION_ENGINES = OCR_ENGINES | {"anydoc", "pdf-inspector"}
 # The tiers that actually read pixels, as opposed to the stub.
 REAL_OCR = {"paddleocr", "pp-structurev3"}
 # The OCR engine the assertions expect. Unset means "whichever is wired".
@@ -341,35 +352,57 @@ def main() -> int:
         # PP-StructureV3 returns a single character from it at 0.49 confidence,
         # which is what puts the page under the vision threshold.
         print("\nvision escalation (faded.pdf)")
-        faded = upload("faded.pdf").json()
-        page = faded["pages"][0]
-        engines = {b["provenance"]["engine"] for b in blocks(faded)}
 
+        # Ask the service which engine is in the slot rather than assuming.
+        # /v1/engines lists the vision tier alongside the others, and after
+        # elimination whatever is left is it.
+        listed = {e["name"] for e in engines}
+        found = sorted(listed - NON_VISION_ENGINES)
+        named = EXPECT_VISION.strip().lower() not in {"1", "true", "yes", "on"}
+        if named:
+            # An explicitly named engine has to be the one that is wired.
+            # Accepting whatever was there instead would turn "we deployed the
+            # wrong engine" into a green sweep.
+            vision = EXPECT_VISION if EXPECT_VISION in listed else ""
+        else:
+            vision = found[0] if len(found) == 1 else ""
         check(
-            f"the faded page was re-read by {VISION}",
-            engines == {VISION},
-            f"engines: {sorted(engines)}",
+            f"the vision tier is wired ({EXPECT_VISION if named else 'any engine'})",
+            bool(vision),
+            f"engines: {sorted(listed)}",
         )
-        check(
-            "the page records that it was escalated",
-            (page.get("quality") or {}).get("escalated") is True,
-            f"quality: {page.get('quality')}",
-        )
-        check(
-            "the escalation is visible in the page's reasons",
-            "vision_escalated" in page["classification"]["reasons"],
-            f"reasons: {page['classification']['reasons']}",
-        )
-        # The recovery, not just the routing: these words exist only as very
-        # faint pixels, and the OCR tier returned one character for the page.
-        text = " ".join(b.get("text") or "" for b in blocks(faded)).upper()
-        for word in ("SHIPPING RECEIPT", "8842-QX", "1,420.75"):
-            check(f"the vision tier recovered {word!r}", word in text, f"got {text[:140]!r}")
-        check(
-            "re-scoring the replaced page beat the OCR attempt",
-            (page.get("quality") or {}).get("score", 0) > 0.5,
-            f"score: {(page.get('quality') or {}).get('score')}",
-        )
+
+        if vision:
+            print(f"  vision tier wired: {vision}")
+            faded = upload("faded.pdf").json()
+            page = faded["pages"][0]
+            page_engines = {b["provenance"]["engine"] for b in blocks(faded)}
+
+            check(
+                f"the faded page was re-read by {vision}",
+                page_engines == {vision},
+                f"engines: {sorted(page_engines)}",
+            )
+            check(
+                "the page records that it was escalated",
+                (page.get("quality") or {}).get("escalated") is True,
+                f"quality: {page.get('quality')}",
+            )
+            check(
+                "the escalation is visible in the page's reasons",
+                "vision_escalated" in page["classification"]["reasons"],
+                f"reasons: {page['classification']['reasons']}",
+            )
+            # The recovery, not just the routing: these words exist only as very
+            # faint pixels, and the OCR tier returned one character for the page.
+            text = " ".join(b.get("text") or "" for b in blocks(faded)).upper()
+            for word in ("SHIPPING RECEIPT", "8842-QX", "1,420.75"):
+                check(f"the vision tier recovered {word!r}", word in text, f"got {text[:140]!r}")
+            check(
+                "re-scoring the replaced page beat the OCR attempt",
+                (page.get("quality") or {}).get("score", 0) > 0.5,
+                f"score: {(page.get('quality') or {}).get('score')}",
+            )
 
     print("\nerror paths")
     corrupt = upload("corrupt.pdf")

@@ -20,6 +20,12 @@ OCR_URL ?= http://$(OCR_HOST):$(OCR_PORT)
 # service refuses to start the engine without it.
 GLM_URL ?= http://127.0.0.1:8080
 
+# Which Tier 3 engine `make e2e-vision` should find. `1` accepts whichever one
+# the service reports, which is right for a developer running either; name it
+# (EXPECT_VISION=glm-ocr) to assert a specific engine and fail if the service
+# is carrying the other.
+EXPECT_VISION ?= 1
+
 # The tier `make ocr` starts. Use EXPECT_OCR=paddleocr with `make ocr-text`.
 EXPECT_OCR ?= pp-structurev3
 # OCR worker processes. Each costs 2.5-3GB once warm; see the `ocr` target.
@@ -108,7 +114,7 @@ e2e-ocr: build
 # Requires a service started with `make ocr-vision`.
 e2e-vision: build
 	@DOLICO_OCR_URL=$(OCR_URL) DOLICO_EXPECT_OCR=$(EXPECT_OCR) \
-		DOLICO_VISION_ENABLED=1 DOLICO_EXPECT_VISION=1 ./scripts/e2e.sh
+		DOLICO_VISION_ENABLED=1 DOLICO_EXPECT_VISION=$(EXPECT_VISION) ./scripts/e2e.sh
 
 # Scores extraction against testdata/ground-truth.json on a cold cache. Set
 # DOLICO_OCR_URL to include the OCR tier; without it, scanned pages score as
