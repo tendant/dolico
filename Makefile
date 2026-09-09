@@ -455,7 +455,11 @@ ocr-vision:
 # `make bench-vision` is the comparison that would settle whether it belongs
 # here -- see docs/glm-ocr-tier-design.md.
 ocr-glm:
-	@DOLICO_OCR_WORKERS=$(OCR_WORKERS) DOLICO_VISION_ENGINE=glm-ocr 		DOLICO_VISION_URL=$(GLM_URL) $(UV) run --project $(OCR_DIR) 		--extra structure --extra glm 		uvicorn dolico_ocr.app:app --host $(OCR_HOST) --port $(OCR_PORT) 		--workers $(OCR_WORKERS)
+	@DOLICO_OCR_WORKERS=$(OCR_WORKERS) DOLICO_VISION_ENGINE=glm-ocr \
+		DOLICO_VISION_URL=$(GLM_URL) $(UV) run --project $(OCR_DIR) \
+		--extra structure --extra glm \
+		uvicorn dolico_ocr.app:app --host $(OCR_HOST) --port $(OCR_PORT) \
+		--workers $(OCR_WORKERS)
 
 # Requires a service started with `make ocr-vision`; against a plain `make ocr`
 # the server logs that MinerU is absent and runs with two tiers.
