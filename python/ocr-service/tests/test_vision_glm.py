@@ -15,7 +15,7 @@ import pytest
 
 from dolico_ocr.canonical import vision_page_payload
 from dolico_ocr.vision_base import VisionError
-from dolico_ocr.vision_glm import ENGINE_NAME, GlmEngine, _blocks, _plain
+from dolico_ocr.vision_glm import ENGINE_NAME, GlmEngine, _blocks, _mapped_label, _plain
 
 TABLE_HTML = (
     "<table><tr><td>Region</td><td>Units</td></tr>"
@@ -209,21 +209,119 @@ class TestRegionsThatAreNotBlocks:
         assert len(_blocks([region("text")])) == 1
 
 
-class TestConfiguration:
-    """The library's defaults are not this pipeline's defaults."""
+class TestCloudIsNeverAccidental:
+    """A page leaving this host is a decision, not a fallback."""
 
-    def test_maas_is_forced_off(self, monkeypatch):
-        # glmocr ships `maas.enabled: true` pointing at open.bigmodel.cn. Every
-        # engine here is local by deliberate choice.
-        monkeypatch.setenv("DOLICO_VISION_URL", "http://127.0.0.1:8080")
-        assert GlmEngine()._config()["mode"] == "selfhosted"
-
-    def test_maas_stays_off_even_with_an_api_key_in_the_environment(self, monkeypatch):
-        # A ZHIPU_API_KEY anywhere in the environment flips glmocr to the cloud
-        # unless `mode` is passed explicitly. It always is.
+    def test_a_stray_zhipu_key_does_not_turn_it_on(self, monkeypatch):
+        # This is the library's own trigger: ZHIPU_API_KEY in the environment
+        # flips it to the cloud unless `mode` is passed explicitly. A key left
+        # there for some other tool must not start uploading documents.
+        monkeypatch.delenv("DOLICO_GLM_API_KEY", raising=False)
         monkeypatch.setenv("DOLICO_VISION_URL", "http://127.0.0.1:8080")
         monkeypatch.setenv("ZHIPU_API_KEY", "sk-should-not-matter")
-        assert GlmEngine()._config()["mode"] == "selfhosted"
+        engine = GlmEngine()
+        assert engine.cloud is False
+        assert engine._config()["mode"] == "selfhosted"
+
+    def test_an_unconfigured_engine_is_unavailable_rather_than_cloud(self, monkeypatch):
+        for var in ("DOLICO_VISION_URL", "DOLICO_MINERU_URL", "DOLICO_GLM_API_KEY"):
+            monkeypatch.delenv(var, raising=False)
+        monkeypatch.setenv("ZHIPU_API_KEY", "sk-should-not-matter")
+        from dolico_ocr import vision_glm
+
+        assert vision_glm.available() is False
+
+    def test_a_self_hosted_endpoint_wins_over_a_leftover_key(self, monkeypatch):
+        # Someone who has stood up their own GLM-OCR gets their own GLM-OCR,
+        # even with a key left from evaluating the cloud.
+        monkeypatch.setenv("DOLICO_VISION_URL", "http://127.0.0.1:8080")
+        monkeypatch.setenv("DOLICO_GLM_API_KEY", "sk-left-over")
+        assert GlmEngine().cloud is False
+
+
+class TestCloudMode:
+    """What `DOLICO_GLM_API_KEY` actually configures."""
+
+    @pytest.fixture(autouse=True)
+    def cloud_env(self, monkeypatch):
+        monkeypatch.delenv("DOLICO_VISION_URL", raising=False)
+        monkeypatch.delenv("DOLICO_MINERU_URL", raising=False)
+        monkeypatch.setenv("DOLICO_GLM_API_KEY", "sk-test")
+
+    def test_the_key_selects_maas(self):
+        config = GlmEngine()._config()
+        assert config["mode"] == "maas"
+        assert config["api_key"] == "sk-test"
+
+    def test_no_endpoint_is_needed(self):
+        # The layout stage runs on Zhipu's side too, so there is nothing local
+        # to point anywhere.
+        assert GlmEngine().cloud is True
+        assert "ocr_api_host" not in GlmEngine()._config()
+
+    def test_a_key_satisfies_the_configuration_half_of_availability(self):
+        # `available()` is configuration AND import, and glmocr is deliberately
+        # not installed for this suite -- so what is checkable here is that a
+        # key clears the configuration half: load() now complains about the
+        # missing package rather than about having nowhere to send the page.
+        with pytest.raises(VisionError, match="not installed"):
+            GlmEngine().load()
+
+    def test_provenance_says_the_page_left_the_host(self):
+        engine = GlmEngine()
+        out = vision_page_payload(
+            1, _blocks([[region("text", "footnote", "1. See appendix B")]]),
+            W, H, ENGINE_NAME, "0.1.5", engine.backend,
+        )
+        # Not the model name: where it was read is the more important fact,
+        # and it should not take reading deployment config to find out.
+        assert out["blocks"][0]["provenance"]["method"] == "glm-ocr/maas:footnote"
+
+    def test_healthz_names_where_pages_go(self):
+        described = GlmEngine().describe()
+        assert described["where"] == "cloud(open.bigmodel.cn)"
+        assert described["backend"] == "maas"
+
+
+class TestCloudLabels:
+    """The cloud returns regions with no `native_label` at all."""
+
+    @pytest.mark.parametrize(
+        "raw,expected",
+        [
+            # Already the four-way label: the self-hosted path.
+            ("table", "table"),
+            ("formula", "formula"),
+            ("text", "text"),
+            # The detector's own vocabulary, which is what the cloud may send.
+            ("display_formula", "formula"),
+            ("inline_formula", "formula"),
+            ("chart", "image"),
+            ("doc_title", "text"),
+            ("footer", "text"),
+            ("something_new", "text"),
+        ],
+    )
+    def test_either_vocabulary_maps_to_the_same_four(self, raw, expected):
+        assert _mapped_label(raw, raw) == expected
+
+    def test_a_cloud_table_is_still_parsed_as_a_grid(self):
+        # The failure this guards: `label: "table"` with no native_label read
+        # as prose would put a page of angle brackets in the canonical model.
+        cloud = {"index": 0, "label": "table", "content": TABLE_HTML,
+                 "bbox_2d": [100, 100, 500, 300]}
+        out = vision_page_payload(1, _blocks([[cloud]]), W, H, ENGINE_NAME, "0.1.5", "maas")
+        assert out["blocks"][0]["type"] == "table"
+
+    def test_a_cloud_formula_loses_its_fences(self):
+        cloud = {"index": 0, "label": "display_formula", "content": "$$\nE = mc^2\n$$",
+                 "bbox_2d": [100, 100, 500, 140]}
+        out = vision_page_payload(1, _blocks([[cloud]]), W, H, ENGINE_NAME, "0.1.5", "maas")
+        assert out["blocks"][0]["text"] == "E = mc^2"
+
+
+class TestConfiguration:
+    """The library's defaults are not this pipeline's defaults."""
 
     def test_the_endpoint_is_split_into_host_and_port(self, monkeypatch):
         monkeypatch.setenv("DOLICO_VISION_URL", "http://ocr.internal:8123")

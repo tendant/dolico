@@ -175,6 +175,17 @@ labels into `text` / `table` / `formula` / `image`, passing anything unmapped
 through under its own name. So the adapter sees both, and both matter: `label`
 decides the canonical type, `native_label` decides the detail.
 
+**Except on the cloud path, which sets no `native_label` at all.**
+`_maas_response_to_pipeline_result` (`api.py:414`) builds each region as
+`{index, label, content, bbox_2d}` and nothing else, and does not say which
+vocabulary its `label` is drawn from — the mapped four or the detector's own.
+So the adapter derives both rather than trusting either: a `label` that is one
+of the four is taken as mapped, anything else is read as native and mapped
+here. Getting this wrong is not subtle in effect — an HTML table would arrive
+as a paragraph of angle brackets, and a formula would keep its `$$` fences —
+but it is entirely silent, because every one of those is a valid canonical
+paragraph.
+
 | GLM-OCR `label` | `native_label` | Canonical |
 | --- | --- | --- |
 | `text` | `doc_title` | `heading`, level 1 |
@@ -219,15 +230,34 @@ repository's measurements were taken, MLX is what makes a local GLM-OCR
 testable at all. `api_mode: ollama_generate` exists for Ollama's native
 endpoint because its OpenAI-compatible path 502s on some vision requests.
 
-**Zhipu MaaS — off, and off by default.** `glmocr/config.yaml` ships
-`maas.enabled: true` pointing at `open.bigmodel.cn`. Every engine in this
-pipeline is local by deliberate choice; the vision-tier design chose MinerU
-partly because a hosted API "would have broken" that line, and shipping an
-engine whose *default* posts customer documents to a third party would break it
-by accident. **The adapter must force `maas.enabled: false`** and treat the
-hosted path as egress if it is offered at all: opt-in by an explicitly named
-variable, visible in `/v1/engines`, and documented in `deploy/README.md`
-alongside everything else that leaves the host.
+**Zhipu MaaS — supported, and never reached by accident.** *This is the
+section the implementation changed most, because the deployment that wanted
+GLM-OCR wanted the cloud API.*
+
+`glmocr/config.yaml` ships `maas.enabled: true` pointing at
+`open.bigmodel.cn`, and a `ZHIPU_API_KEY` anywhere in the environment flips it
+there regardless of the YAML. The original objection was to that *default*, not
+to the cloud as such: an engine that posts documents to a third party because
+nobody configured it otherwise is a different thing from one that does so
+because an operator decided to. So the shape is opt-in by a variable this
+repository owns:
+
+    DOLICO_GLM_API_KEY   the only thing that turns the cloud on
+    ZHIPU_API_KEY        does not, though the library reads it
+    (neither, no URL)    the tier reports itself unavailable
+
+A self-hosted endpoint wins over a leftover key, so standing up your own server
+redirects the pages rather than racing a stale credential. Pages read in the
+cloud carry `glm-ocr/maas:<label>` in provenance, not the model name: "where
+was this page read" should not require reading deployment config.
+
+The cost of this mode is worth stating plainly rather than burying. It is the
+only configuration in this pipeline where a document leaves the host, and in at
+least one deployment those documents are patient records held in a service with
+no authentication of its own, on a 30-day TTL chosen partly to bound exposure.
+That is a decision for whoever runs it — but it should be a decision, and it
+should be visible in `/healthz`, in provenance, and in `deploy/README.md`
+alongside everything else that egresses.
 
 Note that even in the fully remote shape, **PP-DocLayoutV3 still runs
 in-process**. GLM-OCR is not a pure client; `layout_device: cpu` is supported
@@ -252,6 +282,7 @@ its own change with its own number attached.
 | --- | --- | --- |
 | `DOLICO_VISION_ENGINE` | `mineru` | `mineru` or `glm-ocr`. The default keeps every existing deployment on the engine it was measured with. |
 | `DOLICO_VISION_URL` | unset | the remote VLM endpoint; generalizes `DOLICO_MINERU_URL`, which stays as a deprecated alias |
+| `DOLICO_GLM_API_KEY` | unset | with no `DOLICO_VISION_URL` set, pages go to Zhipu's cloud API. The only thing that enables it |
 | `DOLICO_GLM_MODEL` | `glm-ocr` | the served model name, which differs per backend (`mlx-community/GLM-OCR-bf16` for MLX, `glm-ocr:latest` for Ollama) |
 | `DOLICO_GLM_LAYOUT_DEVICE` | `cpu` | where PP-DocLayoutV3 runs |
 | `DOLICO_GLM_API_MODE` | `openai` | `ollama_generate` for Ollama, whose OpenAI-compatible path 502s on vision requests |

@@ -511,11 +511,26 @@ baked in from the extras and does not have to be set on the service — and if
 you do set it, to an engine the image does not carry, the service refuses to
 start rather than quietly serving two tiers.
 
-GLM-OCR additionally **requires** `DOLICO_VISION_URL` pointing at a vLLM,
-SGLang, MLX or Ollama server holding the 0.9B model — only its layout stage
-runs in this container. Without one it reports the vision tier unavailable,
-deliberately: the library's own default is to post documents to a vendor cloud
-API, and nothing else in this deployment sends a document anywhere.
+GLM-OCR needs somewhere to read the page, and there are two answers.
+
+`DOLICO_GLM_API_KEY` sends each escalated page to Zhipu's cloud API — layout
+and recognition both — so there is no model to host. **This is the only thing
+in this deployment that sends a document off the host.** dolico's store holds
+copies of patient documents, in a service with no authentication of its own and
+a 30-day TTL chosen partly to bound exposure; the cloud API is a deliberate
+exception to that, not an extension of it. Pages read this way are marked
+`glm-ocr/maas:<label>` in provenance and `/healthz` reports
+`where: cloud(open.bigmodel.cn)`, so it is visible after the fact as well as
+before.
+
+`DOLICO_VISION_URL` is the other answer: point it at a vLLM, SGLang, MLX or
+Ollama server holding the 0.9B model and only the layout stage runs in this
+container. An endpoint wins over a key, so this is also how you stop using the
+cloud without hunting for a stale credential.
+
+With neither set the tier reports itself unavailable rather than falling back
+to the cloud, and a `ZHIPU_API_KEY` in the environment — which is what the
+library itself reads — does not enable it.
 
 It is **unmeasured on this corpus.** MinerU is the default because it has
 numbers; `docs/glm-ocr-tier-design.md` has the comparison that would change

@@ -14,12 +14,20 @@ page than Tiers 1 and 2 for no stated reason. Handing it one page from
 `raster.render_pdf_pages` fixes both, and hands us the page size in true points
 for free. MinerU needed a second output file for that.
 
-**MaaS is forced off.** `glmocr`'s shipped default is `maas.enabled: true`
-pointing at open.bigmodel.cn, and a `ZHIPU_API_KEY` anywhere in the environment
-flips it there even when the YAML says otherwise. Every engine in this pipeline
-is local by deliberate choice; an engine whose default posts customer documents
-to a third party would break that by accident. `mode="selfhosted"` is passed
-explicitly, which also defeats the environment-variable flip.
+**The cloud API is reachable, but never by accident.** `glmocr`'s shipped
+default is `maas.enabled: true` pointing at open.bigmodel.cn, and a
+`ZHIPU_API_KEY` anywhere in the environment flips it there even when the YAML
+says otherwise. Every other engine in this pipeline is local, and a page
+leaving the host is a decision rather than a fallback -- so it takes
+`DOLICO_GLM_API_KEY`, this repository's own variable, and nothing else turns it
+on. A stray `ZHIPU_API_KEY` does not; an unreachable self-hosted endpoint does
+not; an unconfigured install reports the tier unavailable rather than quietly
+uploading a page. `mode` is passed explicitly either way, so the library's
+default never decides.
+
+Pages that go to the cloud say so in their provenance -- `glm-ocr/maas:<label>`
+against `glm-ocr/<model>:<label>` -- because "where was this page read" is not
+a question a reader should have to answer from deployment config.
 
 **Its JSON is Markdown in disguise.** `content` arrives decorated for
 rendering -- `"# Title"`, `"$$...$$"` -- and the canonical model carries a
@@ -65,6 +73,21 @@ DEFAULT_LAYOUT_DEVICE = "cpu"
 # is used verbatim.
 API_PATHS = {"ollama_generate": "/api/generate", "openai": "/v1/chat/completions"}
 
+# The four-way label glmocr's own formatter maps regions onto. The cloud API
+# returns regions with no `native_label` at all, so its `label` may be either
+# the mapped one or the detector's own -- and which one decides whether this
+# adapter strips `$$` fences and reads HTML as a table. Normalized rather than
+# assumed.
+_MAPPED_LABELS = {"text", "table", "formula", "image"}
+
+_NATIVE_TO_MAPPED = {
+    "table": "table",
+    "display_formula": "formula",
+    "inline_formula": "formula",
+    "chart": "image",
+    "image": "image",
+}
+
 # A leading run of `#` on a title region, which `_format_content` adds
 # unconditionally. The level comes from the native label, not from counting
 # these: reading the level back out of the syntax would make canonical
@@ -80,10 +103,11 @@ def available() -> bool:
     Two conditions, and the second is the one that matters. Importing proves
     less than it does for MinerU: a `pip install glmocr` with no extras has no
     torch, no layout model and no way to know it cannot serve until it tries --
-    it would simply reach for the cloud. Requiring an endpoint makes "installed
-    but unconfigured" report unavailable, which is what it is.
+    it would simply reach for the cloud. Requiring somewhere to send the page --
+    an endpoint of our own, or an explicit cloud key -- makes "installed but
+    unconfigured" report unavailable, which is what it is.
     """
-    if not server_url():
+    if not server_url() and not api_key():
         return False
     try:
         from glmocr.api import GlmOcr  # noqa: F401,PLC0415
@@ -113,6 +137,7 @@ class GlmEngine:
         # that 502s on vision requests to its OpenAI-compatible path.
         self.api_mode = os.environ.get("DOLICO_GLM_API_MODE", "openai")
         self.server_url = server_url()
+        self.api_key = api_key()
         self._lock = threading.Lock()
         self._parser = None
         self._loaded = False
@@ -127,10 +152,11 @@ class GlmEngine:
         """
         if self._loaded:
             return
-        if not self.server_url:
+        if not self.server_url and not self.api_key:
             raise VisionError(
-                "GLM-OCR needs a model endpoint; set DOLICO_VISION_URL to a "
-                "vLLM, SGLang, MLX or Ollama server"
+                "GLM-OCR needs somewhere to read the page: set DOLICO_VISION_URL "
+                "to a vLLM, SGLang, MLX or Ollama server, or DOLICO_GLM_API_KEY "
+                "to send pages to Zhipu's cloud API"
             )
         try:
             from glmocr.api import GlmOcr  # noqa: PLC0415
@@ -153,21 +179,45 @@ class GlmEngine:
             raise VisionError(f"GLM-OCR failed to start: {exc}") from exc
 
         log.info(
-            "vision tier ready (glm-ocr=%s model=%s endpoint=%s layout=%s)",
+            "vision tier ready (glm-ocr=%s model=%s %s layout=%s)",
             self._version,
             self.model,
-            self.server_url,
-            self.layout_device,
+            # Loud about the cloud, because it is the one configuration where
+            # a page leaves this host.
+            "endpoint=cloud(open.bigmodel.cn)" if self.cloud
+            else f"endpoint={self.server_url}",
+            "n/a" if self.cloud else self.layout_device,
         )
         self._loaded = True
+
+    @property
+    def cloud(self) -> bool:
+        """Whether pages go to Zhipu rather than to a server we run.
+
+        A configured endpoint wins over a key: if someone has stood up their
+        own GLM-OCR, that is where the pages should go, and a key left over
+        from evaluating the cloud should not silently redirect them.
+        """
+        return not self.server_url and bool(self.api_key)
 
     def _config(self) -> dict:
         """Constructor arguments for `GlmOcr`.
 
-        Split out because it is the part worth testing without a model: the
-        MaaS guard, the endpoint, and the one post-processing switch we turn
+        Split out because it is the part worth testing without a model: which
+        mode, where the page goes, and the one post-processing switch we turn
         off are all decisions rather than plumbing.
         """
+        if self.cloud:
+            # The layout stage runs on Zhipu's side too, so there is no local
+            # device to place and no endpoint path to get right. `mode` is
+            # still explicit: it is the only thing standing between this and
+            # the library's own default.
+            return {
+                "mode": "maas",
+                "api_key": self.api_key,
+                "model": self.model,
+            }
+
         url = urlparse(self.server_url or "")
         if not url.hostname:
             raise VisionError(
@@ -217,16 +267,21 @@ class GlmEngine:
         MinerU records its backend here because that is the difference between
         a real third tier and a second run of Tier 2's model family. The
         equivalent question for a deployment that could be pointing at any
-        OpenAI-compatible endpoint is which model answered.
+        OpenAI-compatible endpoint is which model answered -- and, before that,
+        whether the page was read on this host at all.
         """
-        return self.model
+        return "maas" if self.cloud else self.model
 
     def describe(self) -> dict[str, str]:
         return {
             "engine": ENGINE_NAME,
-            "backend": self.model,
-            "layout_device": self.layout_device,
-            "api_mode": self.api_mode,
+            "backend": self.backend,
+            "model": self.model,
+            # Named rather than implied by an empty server_url, so an operator
+            # reading /healthz can see where pages go without inferring it.
+            "where": "cloud(open.bigmodel.cn)" if self.cloud else "self-hosted",
+            "layout_device": "" if self.cloud else self.layout_device,
+            "api_mode": "" if self.cloud else self.api_mode,
             "server_url": self.server_url or "",
         }
 
@@ -257,6 +312,16 @@ class GlmEngine:
                 raise VisionError(f"GLM-OCR failed on page {page_number}: {exc}") from exc
 
         return _blocks(result.json_result), page.width_pt, page.height_pt
+
+
+def api_key() -> str | None:
+    """The Zhipu cloud key, under this repository's own name only.
+
+    Deliberately not `ZHIPU_API_KEY`, which is what the library reads. A key
+    left in the environment for some other tool must not be what decides that
+    documents start leaving this host.
+    """
+    return os.environ.get("DOLICO_GLM_API_KEY") or None
 
 
 def _dpi(default: int) -> int:
@@ -302,8 +367,13 @@ def _blocks(json_result) -> list[VisionBlock]:
     for item in regions:
         if not isinstance(item, dict):
             continue
-        label = str(item.get("label") or "")
-        native = str(item.get("native_label") or label)
+        raw = str(item.get("label") or "")
+        # The self-hosted path sets both; the cloud path sets only `label`,
+        # and does not say which of the two vocabularies it is using. Both are
+        # derived rather than trusted -- getting it wrong means an HTML table
+        # arriving as a paragraph of angle brackets.
+        native = str(item.get("native_label") or raw)
+        label = _mapped_label(raw, native)
         bbox = item.get("bbox_2d")
         if not native or not bbox or len(bbox) < 4:
             continue
@@ -337,11 +407,29 @@ def _blocks(json_result) -> list[VisionBlock]:
     return blocks
 
 
+def _mapped_label(raw: str, native_label: str) -> str:
+    """The four-way label, whichever vocabulary the caller was handed.
+
+    `raw` is already the mapped one on the self-hosted path. On the cloud path
+    it may be either, so a label that is not one of the four is read as the
+    detector's own and mapped here -- and anything unrecognized is text, which
+    is the same safe default the canonical label table uses.
+    """
+    if raw in _MAPPED_LABELS:
+        return raw
+    return _NATIVE_TO_MAPPED.get(native_label, "text")
+
+
 def _plain(content: str, label: str, native_label: str) -> tuple[str, int | None]:
     """Undo the Markdown that `_format_content` adds, and return the level.
 
     Only the decorations that cannot be switched off in configuration are
     handled here; bullets are turned off at the source in `_config`.
+
+    Every strip is conditional on the decoration actually being there, which
+    is what lets one function serve both paths: the cloud API formats
+    server-side and this adapter cannot see its switches, so the honest thing
+    is to remove what is present rather than what is expected.
     """
     if label == "table":
         # HTML, and `canonical` hands it to the same table parser Tier 2 uses.

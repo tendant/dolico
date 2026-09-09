@@ -180,6 +180,7 @@ Two things both OCR tiers provide that no other engine in the pipeline can:
 | `DOLICO_MINERU_EFFORT` | `medium` | MinerU inference effort |
 | `DOLICO_MINERU_URL` | unset | the old name for `DOLICO_VISION_URL`; still honored |
 | `DOLICO_GLM_MODEL` | `glm-ocr` | the model name the GLM-OCR endpoint answers to |
+| `DOLICO_GLM_API_KEY` | unset | send pages to Zhipu's cloud API instead of a server you run |
 | `DOLICO_GLM_LAYOUT_DEVICE` | `cpu` | where PP-DocLayoutV3 runs |
 | `DOLICO_GLM_API_MODE` | `openai` | `ollama_generate` for Ollama, whose OpenAI-compatible path 502s on vision requests |
 | `DOLICO_GLM_DPI` | `200` | render DPI for pages sent to GLM-OCR |
@@ -204,8 +205,24 @@ The default is the measured one and should stay that way until `make bench-glm`
 says otherwise. `docs/glm-ocr-tier-design.md` has the comparison that would
 settle it, with an empty column.
 
-No two backends serve the model at the same path, so `DOLICO_VISION_URL` is
-where that is settled:
+There are two ways to run it, and the first is one line:
+
+```
+DOLICO_VISION_ENGINE=glm-ocr
+DOLICO_GLM_API_KEY=<a key from open.bigmodel.cn>
+```
+
+That sends each escalated page to Zhipu's cloud API — layout and recognition
+both — so nothing but `glmocr` itself is installed locally and there is no
+model to host. **It is also the only configuration in this pipeline where a
+document leaves the machine**, which is why it takes this repository's own
+variable and nothing else: a `ZHIPU_API_KEY` in the environment, which is what
+the library itself reads, does not turn it on. Pages read this way carry
+`glm-ocr/maas:<label>` in provenance rather than the model name.
+
+The alternative is to serve the 0.9B model yourself and point dolico at it with
+`DOLICO_VISION_URL`, in which case only the layout stage runs here. No two
+backends serve it at the same path:
 
 | Serving it with | `DOLICO_VISION_URL` | also set |
 | --- | --- | --- |
