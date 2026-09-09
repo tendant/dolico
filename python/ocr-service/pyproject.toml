@@ -28,7 +28,13 @@ structure = ["paddlex[ocr]>=3.7"]
 # again -- roughly 1GB of packages plus ~8GB of model weights on first run --
 # and it only ever runs on pages that already failed twice, so it is opt-in
 # even relative to the other optional tier. See docs/vision-tier-design.md.
-vision = ["mineru[core]>=2.5"]
+#
+# Capped below 4: the `core` extra does not exist there. MinerU 4.0 (in
+# pre-release as 4.0.0a6) reorganizes its extras into `torch` and `full`, so an
+# uncapped range would resolve to a version this line cannot install the moment
+# 4.0 goes stable. Lifting the cap means picking the new extra, not just the
+# new number.
+vision = ["mineru[core]>=2.5,<4"]
 # GLM-OCR (Tier 3, the alternative engine). Selected with
 # DOLICO_VISION_ENGINE=glm-ocr; see docs/glm-ocr-tier-design.md.
 #
