@@ -487,7 +487,7 @@ func (s *shardingService) start(t *testing.T) string {
 		}
 		id := s.engineID
 		if r.FormValue("tier") == "vision" {
-			id = paddleocr.VisionName
+			id = paddleocr.DefaultVisionName
 		}
 		writeJSON(w, 200, pagesResponse(id, pages))
 	})

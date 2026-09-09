@@ -9,8 +9,15 @@ import (
 	"github.com/tendant/dolico/internal/engine"
 )
 
-// VisionName is the engine identifier the service reports for Tier 3.
-const VisionName = "mineru"
+// DefaultVisionName is the Tier 3 engine to assume before the service has said
+// which one it serves.
+//
+// It is a default rather than the answer. The tier has two engines -- MinerU
+// and GLM-OCR -- selected by DOLICO_VISION_ENGINE on the service, and the name
+// feeds both Provenance.Engine and the page cache key. Hardcoding one of them
+// would file the other's pages under it, so a switch of engines would serve
+// cached pages the new engine never produced.
+const DefaultVisionName = "mineru"
 
 // VisionEngine is Tier 3: the fallback for pages the OCR tiers lose.
 //
@@ -27,6 +34,7 @@ type VisionEngine struct {
 	ocr *Engine
 
 	mu      sync.RWMutex
+	name    string
 	version string
 }
 
@@ -40,16 +48,29 @@ type VisionEngine struct {
 // are different models on different release cycles, and the version is part of
 // the page cache key: labelling MinerU's output with PaddleOCR's version would
 // make a MinerU upgrade invisible to the cache. The service cannot report it
-// at startup either -- MinerU loads on first use -- so it is adopted from the
-// first real answer.
+// at startup either -- the vision model loads on first use -- so it is adopted
+// from the first real answer.
+//
+// The name is taken from the service at startup, where the version cannot be:
+// which engine is in the Tier 3 slot is a configuration the service knows
+// before it loads anything, and Name() is read for logs and errors long before
+// a page is escalated. It is re-adopted from the first real answer as well, in
+// case the service was reconfigured underneath us.
 func NewVision(ocr *Engine) *VisionEngine {
 	if ocr == nil || !ocr.VisionAvailable() {
 		return nil
 	}
-	return &VisionEngine{ocr: ocr}
+	return &VisionEngine{ocr: ocr, name: ocr.VisionEngineName()}
 }
 
-func (e *VisionEngine) Name() string { return VisionName }
+func (e *VisionEngine) Name() string {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	if e.name == "" {
+		return DefaultVisionName
+	}
+	return e.name
+}
 
 func (e *VisionEngine) Version() string {
 	e.mu.RLock()
@@ -62,7 +83,7 @@ func (e *VisionEngine) Version() string {
 
 // Inspect always declines: Tier 3 never decides what a document is.
 func (e *VisionEngine) Inspect(context.Context, canonical.Source, string) (*engine.Inspection, error) {
-	return nil, fmt.Errorf("%w: %s does not inspect documents", engine.ErrUnsupported, VisionName)
+	return nil, fmt.Errorf("%w: %s does not inspect documents", engine.ErrUnsupported, e.Name())
 }
 
 // Supports always scores zero — the router reaches this engine directly.
@@ -75,7 +96,7 @@ func (e *VisionEngine) Supports(*engine.Inspection) engine.SupportScore { return
 // splitting the request would only multiply document uploads.
 func (e *VisionEngine) Extract(ctx context.Context, req *engine.ExtractRequest) (*engine.ExtractResult, error) {
 	if len(req.Pages) == 0 {
-		return nil, fmt.Errorf("%w: %s extracts named pages only", engine.ErrUnsupported, VisionName)
+		return nil, fmt.Errorf("%w: %s extracts named pages only", engine.ErrUnsupported, e.Name())
 	}
 
 	select {
@@ -85,16 +106,30 @@ func (e *VisionEngine) Extract(ctx context.Context, req *engine.ExtractRequest) 
 		return nil, ctx.Err()
 	}
 
-	res, version, err := e.ocr.extractTier(ctx, req, req.Pages, "vision")
+	res, who, err := e.ocr.extractTier(ctx, req, req.Pages, "vision")
 	if err != nil {
 		return nil, err
 	}
-	if version != "" && version != e.Version() {
-		e.mu.Lock()
-		e.version = version
-		e.mu.Unlock()
-	}
+	e.adopt(who)
 	return res, nil
+}
+
+// adopt records who actually answered.
+//
+// Both fields feed the page cache key, and neither can be known before a page
+// has been read: the version because the model loads lazily, the name because
+// the service may have been reconfigured since startup. Taking them from the
+// answer rather than asserting them is what keeps a cached page attributable
+// to the engine that produced it.
+func (e *VisionEngine) adopt(who tierIdentity) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if who.Version != "" {
+		e.version = who.Version
+	}
+	if who.Engine != "" {
+		e.name = who.Engine
+	}
 }
 
 // VisionAvailable reports whether the service has the vision tier installed.
@@ -102,4 +137,12 @@ func (e *Engine) VisionAvailable() bool {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
 	return e.visionAvailable
+}
+
+// VisionEngineName is which engine the service has in its Tier 3 slot, or ""
+// if it did not say.
+func (e *Engine) VisionEngineName() string {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	return e.visionEngine
 }

@@ -30,7 +30,7 @@ from .engine import OCREngine
 from .layout import group_lines
 from .raster import DEFAULT_DPI, RasterError, is_pdf, render_pdf_pages, wrap_image
 from .structure import StructureEngine
-from .vision import VisionEngine, VisionError
+from .vision_base import VisionError
 
 logging.basicConfig(
     level=os.environ.get("DOLICO_OCR_LOG_LEVEL", "INFO"),
@@ -46,10 +46,11 @@ engine = OCREngine(lang=LANG)
 # because a scanned table read as flat text is wrong rather than merely
 # uglier, and it costs only about a third more per page.
 structure = StructureEngine(lang=LANG)
-# Tier 3: MinerU. Never the default for a document -- it is reached per page,
-# only for pages the other tiers already lost, because it costs seconds and
-# gigabytes rather than milliseconds.
-vision = VisionEngine()
+# Tier 3: MinerU or GLM-OCR, whichever DOLICO_VISION_ENGINE selects. Never the
+# default for a document -- it is reached per page, only for pages the other
+# tiers already lost, because it costs seconds and gigabytes rather than
+# milliseconds.
+vision = vision_mod.new_engine()
 
 # "layout" | "text" | "auto". Auto uses Tier 2 when it is installable.
 TIER = os.environ.get("DOLICO_OCR_TIER", "auto").strip().lower()
@@ -230,17 +231,20 @@ async def extract(
 
 
 async def _extract_vision(data: bytes, wanted: list[int] | None, started: float) -> JSONResponse:
-    """Tier 3: read named pages with MinerU.
+    """Tier 3: read named pages with whichever vision engine is selected.
 
     Named pages only. Vision runs when the cheaper tiers have already failed a
     specific page, so a whole-document vision request is a caller mistake
     rather than something to quietly and expensively honor.
     """
     if not vision_mod.available():
+        # Names the engine, because "not installed" and "installed but pointed
+        # at nothing" are both reported here and only the first is fixed by
+        # installing something.
         return _error(
             503,
             "unavailable",
-            "the vision tier is not installed; run `uv sync --extra vision`",
+            f"the vision tier ({vision_mod.ENGINE_NAME}) is not available here",
         )
     if not is_pdf(data):
         return _error(415, "unsupported", "the vision tier reads PDFs only")
@@ -263,7 +267,10 @@ async def _extract_vision(data: bytes, wanted: list[int] | None, started: float)
             continue
 
         pages_out.append(
-            vision_page_payload(number, blocks, width, height, vision.version, vision.backend)
+            vision_page_payload(
+                number, blocks, width, height,
+                vision_mod.ENGINE_NAME, vision.version, vision.backend,
+            )
         )
         log.info("vision page=%d blocks=%d", number, len(blocks))
 

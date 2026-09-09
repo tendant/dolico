@@ -291,6 +291,9 @@ an empty read the OCR result stands and the page is tagged `vision_failed` or
 `vision_empty`, because a page that scored 0.2 is still worth more than nothing.
 [`docs/vision-tier-design.md`](docs/vision-tier-design.md) records why MinerU
 rather than a hosted vision LLM, and what that choice costs.
+[`docs/glm-ocr-tier-design.md`](docs/glm-ocr-tier-design.md) designs a second
+engine for the same tier, and says what would have to be measured before it
+earned a place.
 
 **A second engine is what catches OCR that is wrong and sure of itself.** On a
 real 1922 newspaper scan the OCR tier gets 54% of the words wrong — `11:13` for

@@ -79,6 +79,9 @@ type Engine struct {
 	// separately from the serving tier, because vision is reached per page by
 	// the router rather than by being this service's mode.
 	visionAvailable bool
+	// visionEngine is which engine is in that slot -- the tier has more than
+	// one, and the name feeds provenance and the page cache key.
+	visionEngine string
 }
 
 // Option configures the engine.
@@ -228,6 +231,7 @@ func (e *Engine) refreshVersion(ctx context.Context) error {
 	e.tier = payload.Tier
 	e.serviceWorkers = payload.Workers
 	e.visionAvailable = payload.VisionAvailable
+	e.visionEngine = payload.VisionEngine
 	e.mu.Unlock()
 	return nil
 }
@@ -363,43 +367,56 @@ func (e *Engine) extractOne(ctx context.Context, req *engine.ExtractRequest, pag
 	return res, err
 }
 
+// tierIdentity is who answered a tier request, as the service reported it.
+//
+// Both halves are needed by the vision engine and neither is knowable in
+// advance: its model loads lazily, so the version arrives with the first page,
+// and which engine occupies the tier is the service's configuration rather
+// than this client's.
+type tierIdentity struct {
+	Engine  string
+	Version string
+}
+
 // extractTier runs a single request against a named tier of the service.
 //
 // An empty tier means "whichever tier the service is serving"; "vision" reaches
 // Tier 3 for the named pages. Shared by the OCR and vision engines because the
 // transport is identical — only the tier field and the engine that answers
-// differ. Also returns the engine version the service reported, so each caller
-// can track its own tier's version for cache keys.
+// differ. Also returns who answered, so each caller can track its own tier's
+// identity for cache keys.
 func (e *Engine) extractTier(
 	ctx context.Context, req *engine.ExtractRequest, pages []int, tier string,
-) (*engine.ExtractResult, string, error) {
+) (*engine.ExtractResult, tierIdentity, error) {
+	var none tierIdentity
+
 	body, contentType, err := buildForm(req, pages, tier)
 	if err != nil {
-		return nil, "", err
+		return nil, none, err
 	}
 
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, e.baseURL+"/v1/extract", body)
 	if err != nil {
-		return nil, "", fmt.Errorf("paddleocr: %w", err)
+		return nil, none, fmt.Errorf("paddleocr: %w", err)
 	}
 	httpReq.Header.Set("Content-Type", contentType)
 
 	resp, err := e.client.Do(httpReq)
 	if err != nil {
-		return nil, "", fmt.Errorf("paddleocr: request to %s failed: %w", e.baseURL, err)
+		return nil, none, fmt.Errorf("paddleocr: request to %s failed: %w", e.baseURL, err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, "", classify(resp)
+		return nil, none, classify(resp)
 	}
 
 	var payload extractResponse
 	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
-		return nil, "", fmt.Errorf("paddleocr: cannot parse the response: %w", err)
+		return nil, none, fmt.Errorf("paddleocr: cannot parse the response: %w", err)
 	}
 	if payload.SchemaVersion != canonical.SchemaVersion {
-		return nil, "", fmt.Errorf("paddleocr: response schema %q, expected %q",
+		return nil, none, fmt.Errorf("paddleocr: response schema %q, expected %q",
 			payload.SchemaVersion, canonical.SchemaVersion)
 	}
 
@@ -408,11 +425,12 @@ func (e *Engine) extractTier(
 		Metadata:   payload.Metadata,
 		DurationMS: payload.DurationMS,
 	}
+	who := tierIdentity{Engine: payload.Engine, Version: payload.EngineVersion}
 
 	// The vision tier answers as a different engine by design, so the
 	// identity checks below apply only to the OCR tiers.
 	if tier != "" {
-		return result, payload.EngineVersion, nil
+		return result, who, nil
 	}
 
 	// The service reports the engine version it actually ran, which may differ
@@ -425,12 +443,12 @@ func (e *Engine) extractTier(
 	// A tier change mid-run would silently mix layout blocks and text lines
 	// under one cache key, so it is a hard error rather than a surprise.
 	if payload.Engine != "" && payload.Engine != e.Name() {
-		return nil, "", fmt.Errorf(
+		return nil, none, fmt.Errorf(
 			"paddleocr: the service switched tier from %q to %q; restart dolico to pick it up",
 			e.Name(), payload.Engine)
 	}
 
-	return result, payload.EngineVersion, nil
+	return result, who, nil
 }
 
 // buildForm streams the document and the page list into a multipart body.

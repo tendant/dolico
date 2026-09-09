@@ -6,12 +6,16 @@ coordinate conversions, table conversion, and reading order.
 
 The fixtures are shaped like real MinerU output: boxes normalized to 0–1000
 with a top-left origin, tables as HTML in `table_body`.
+
+`test_vision_glm.py` does the same for the other engine, and
+`test_vision_select.py` covers what the two have in common.
 """
 
 import pytest
 
 from dolico_ocr.canonical import vision_page_payload
-from dolico_ocr.vision import ENGINE_NAME, VisionBlock, _remote_backend, VisionError
+from dolico_ocr.vision_base import VisionBlock, VisionError
+from dolico_ocr.vision_mineru import ENGINE_NAME, _remote_backend
 
 TABLE_HTML = (
     "<table><tr><td>Region</td><td>Units</td></tr>"
@@ -27,7 +31,7 @@ def block(label, text="some text", x0=100, y0=100, x1=500, y1=140, level=None):
 
 
 def build(blocks, backend="hybrid-engine"):
-    return vision_page_payload(1, blocks, W, H, "2.5.0", backend)
+    return vision_page_payload(1, blocks, W, H, ENGINE_NAME, "2.5.0", backend)
 
 
 class TestLabelMapping:

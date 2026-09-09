@@ -73,12 +73,57 @@ func TestVisionEngineIdentity(t *testing.T) {
 	if v == nil {
 		t.Fatal("expected a vision engine")
 	}
-	if v.Name() != paddleocr.VisionName {
-		t.Errorf("Name = %q, want %q", v.Name(), paddleocr.VisionName)
+	if v.Name() != paddleocr.DefaultVisionName {
+		t.Errorf("Name = %q, want %q", v.Name(), paddleocr.DefaultVisionName)
 	}
-	// The OCR tier's version is not MinerU's, and it is part of the cache key.
+	// The OCR tier's version is not the vision model's, and it is part of the
+	// cache key.
 	if got := v.Version(); got != "unknown" {
 		t.Errorf("Version = %q before any call; want unknown", got)
+	}
+}
+
+// The tier has more than one engine, and the name feeds both provenance and
+// the page cache key. Taking the service's word for it at startup is what
+// keeps a GLM-OCR page from being filed under MinerU -- where a later run
+// would find it and serve output the configured engine never produced.
+func TestVisionTakesItsNameFromTheService(t *testing.T) {
+	_, v := visionEngine(t, &fakeService{visionAvailable: true, visionEngine: "glm-ocr"})
+	if v == nil {
+		t.Fatal("expected a vision engine")
+	}
+	if v.Name() != "glm-ocr" {
+		t.Errorf("Name = %q, want the configured glm-ocr", v.Name())
+	}
+}
+
+// Two services running different Tier 3 engines must not produce engines that
+// agree about who they are, because a cache key that cannot tell them apart
+// would serve one engine's pages as the other's.
+func TestVisionEnginesAreDistinguishable(t *testing.T) {
+	_, mineru := visionEngine(t, &fakeService{visionAvailable: true})
+	_, glm := visionEngine(t, &fakeService{visionAvailable: true, visionEngine: "glm-ocr"})
+
+	if mineru.Name() == glm.Name() {
+		t.Fatalf("both tiers answer to %q", mineru.Name())
+	}
+}
+
+// The service could have been reconfigured since startup. The answer knows
+// better than the version endpoint did.
+func TestVisionReadoptsTheNameFromARealAnswer(t *testing.T) {
+	svc := &fakeService{visionAvailable: true, visionBody: visionResponse(1)}
+	_, v := visionEngine(t, svc)
+
+	// visionResponse answers as mineru; start the client believing otherwise.
+	if v.Name() != paddleocr.DefaultVisionName {
+		t.Fatalf("Name = %q before the call", v.Name())
+	}
+	if _, err := v.Extract(context.Background(), request(t, 1)); err != nil {
+		t.Fatal(err)
+	}
+	if v.Name() != "mineru" {
+		t.Errorf("Name = %q after the answer, want mineru", v.Name())
 	}
 }
 
@@ -264,10 +309,11 @@ func TestVisionAgainstTheRealService(t *testing.T) {
 
 	var table *canonical.Table
 	for _, b := range res.Pages[0].Blocks {
-		if b.Provenance.Engine != paddleocr.VisionName {
+		if b.Provenance.Engine != paddleocr.DefaultVisionName {
 			t.Errorf("block %s came back as engine %q", b.ID, b.Provenance.Engine)
 		}
-		// MinerU reports no confidence and this pipeline does not invent one.
+		// Neither vision engine reports confidence, and this pipeline does
+		// not invent one.
 		if b.Confidence != nil {
 			t.Errorf("block %s carries a confidence the model never reported", b.ID)
 		}

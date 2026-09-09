@@ -311,7 +311,7 @@ class FakeVisionEngine:
         pass
 
     def read(self, pdf_bytes, page_number):
-        from dolico_ocr.vision import VisionBlock, VisionError
+        from dolico_ocr.vision_base import VisionBlock, VisionError
 
         self.calls.append(page_number)
         if page_number in self.fail_pages:
@@ -389,11 +389,15 @@ class TestVisionTier:
         resp = self.post(vision_client, name="x.png", data=b"\x89PNG\r\n\x1a\n")
         assert resp.status_code == 415
 
-    def test_unavailable_when_mineru_is_not_installed(self, vision_client, monkeypatch):
+    def test_unavailable_when_the_vision_engine_is_not_installed(
+        self, vision_client, monkeypatch
+    ):
         monkeypatch.setattr(app_module.vision_mod, "available", lambda: False)
         resp = self.post(vision_client)
         assert resp.status_code == 503
-        assert "uv sync --extra vision" in resp.json()["message"]
+        # The engine is named: "not installed" and "installed but pointed at
+        # nothing" both land here, and only one of them is fixed by installing.
+        assert app_module.vision_mod.ENGINE_NAME in resp.json()["message"]
 
     def test_availability_is_advertised_separately_from_the_serving_tier(self, vision_client):
         health = vision_client.get("/healthz").json()

@@ -478,7 +478,16 @@ model weights on first run, and takes memory from ~3GB to **~7GB per worker**,
 because the disagreement probe means MinerU is resident for every document with
 a scanned page rather than an occasional escalation.
 
-1. In `deploy/Dockerfile.ocr`, add `--extra vision` to both `uv sync` lines.
+1. Build the OCR image with the extra:
+
+   ```bash
+   make image OCR_EXTRAS="structure vision"
+   ```
+
+   This tags it `dolico-ocr:<commit>-mineru` rather than `dolico-ocr:<commit>`,
+   so it cannot silently replace a Tier-2-only image built from the same
+   commit. The image records which engine it holds, so the `ocr` service needs
+   no matching setting.
 2. Set `DOLICO_VISION_ENABLED=1` on the `api` service.
 3. Raise `OCR_MEM_LIMIT` to at least `workers × 7GB` and give the model volume
    a few more gigabytes.
@@ -486,9 +495,31 @@ a scanned page rather than an occasional escalation.
 `docs/vision-tier-design.md` has the measurements, including what it costs on
 documents that did not need it (+36% wall time on a corpus where nothing did).
 
-`DOLICO_MINERU_URL` would let several OCR workers share one copy of the model
-instead of each holding ~3GB. It is written and documented but has never been
-run against a real MinerU server, so it is not wired into this compose file.
+`DOLICO_VISION_URL` (formerly `DOLICO_MINERU_URL`, still honored) would let
+several OCR workers share one copy of the model instead of each holding ~3GB.
+It is written and documented but has never been run against a real MinerU
+server, so it is not wired into this compose file.
+
+### The other Tier 3 engine
+
+`OCR_EXTRAS="structure glm"` builds GLM-OCR instead, tagged `-glm`.
+
+**One engine per image, enforced at build time.** MinerU pins
+`transformers<5`; `glmocr` requires `>=5.3`. Naming both extras fails the build
+with that explanation rather than a resolver trace. `DOLICO_VISION_ENGINE` is
+baked in from the extras and does not have to be set on the service — and if
+you do set it, to an engine the image does not carry, the service refuses to
+start rather than quietly serving two tiers.
+
+GLM-OCR additionally **requires** `DOLICO_VISION_URL` pointing at a vLLM,
+SGLang, MLX or Ollama server holding the 0.9B model — only its layout stage
+runs in this container. Without one it reports the vision tier unavailable,
+deliberately: the library's own default is to post documents to a vendor cloud
+API, and nothing else in this deployment sends a document anywhere.
+
+It is **unmeasured on this corpus.** MinerU is the default because it has
+numbers; `docs/glm-ocr-tier-design.md` has the comparison that would change
+that, with an empty column.
 
 ## Configuration
 
