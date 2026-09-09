@@ -83,13 +83,18 @@ WORKDIR /app
 RUN chown dolico:dolico /app \
     && mkdir -p /home/dolico/.paddlex \
     && chown dolico:dolico /home/dolico/.paddlex \
-    # And the vision tier's weight cache, for exactly the same reason. A
-    # deployment that mounts a volume here gets it root-owned unless the
+    # And the vision tier's weight caches, for exactly the same reason. A
+    # deployment that mounts a volume at either gets it root-owned unless the
     # directory exists in the image first, and the failure is not a permission
-    # error: HuggingFace reports "cannot find the appropriate snapshot folder
-    # for the specified revision ... check your internet connection", which
-    # sends you looking at the network.
-    && mkdir -p /home/dolico/.cache/huggingface \
+    # error: the hub client reports "cannot find the appropriate snapshot
+    # folder for the specified revision ... check your internet connection",
+    # which sends you looking at the network.
+    #
+    # Both, because MinerU resolves weights from ModelScope by default and from
+    # Hugging Face when MINERU_MODEL_SOURCE says so, and they cache to
+    # different directories. Creating only the one you expect is how you find
+    # out you expected the wrong one.
+    && mkdir -p /home/dolico/.cache/modelscope /home/dolico/.cache/huggingface \
     && chown -R dolico:dolico /home/dolico/.cache
 
 USER dolico
