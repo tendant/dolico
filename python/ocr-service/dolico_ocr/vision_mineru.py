@@ -4,6 +4,10 @@ Tiers 1 and 2 fail the same way, because they are the same kind of thing: a
 detector trained on documents that look like documents. A page they both lose
 needs a different kind of model, not another attempt with the same one.
 
+This is the default engine for the tier and the only one with measurements
+behind it -- see `docs/vision-tier-design.md`. `vision_glm` is the other, and
+`vision` chooses.
+
 ## The backend choice is the whole point
 
 MinerU ships several backends and they are not interchangeable here:
@@ -38,7 +42,8 @@ import logging
 import os
 import tempfile
 import threading
-from dataclasses import dataclass
+
+from .vision_base import VisionBlock, VisionError, server_url
 
 log = logging.getLogger(__name__)
 
@@ -47,35 +52,6 @@ ENGINE_NAME = "mineru"
 # See the module docstring: `pipeline` is Tier 2's own model family and is the
 # wrong choice for a tier whose job is to succeed where Tier 2 failed.
 DEFAULT_BACKEND = "hybrid-engine"
-
-
-class VisionError(Exception):
-    """The page could not be read. The caller keeps its OCR result."""
-
-
-@dataclass(frozen=True)
-class VisionBlock:
-    """One block as MinerU reports it, before canonical mapping."""
-
-    label: str
-    """MinerU's own type: text, header, footer, table, list, equation, image."""
-
-    text: str
-    """Plain text, or an HTML fragment when `is_table`."""
-
-    x0: float
-    y0: float
-    x1: float
-    y1: float
-    """Extent, normalized to 0-1000 with a top-left origin, as MinerU reports
-    it in content_list.json."""
-
-    text_level: int | None = None
-    """Heading depth when MinerU marks one; None for body text."""
-
-    @property
-    def is_table(self) -> bool:
-        return self.label == "table"
 
 
 def available() -> bool:
@@ -93,7 +69,7 @@ def available() -> bool:
         return False
 
 
-class VisionEngine:
+class MineruEngine:
     """MinerU behind a lock, matching the other two tiers.
 
     Serialized for the same reason: one model, one inference at a time, and
@@ -107,7 +83,11 @@ class VisionEngine:
         # When set, MinerU runs as its own service and this process only talks
         # to it. That keeps ~8GB of model weights out of a service already
         # measured at ~3GB per worker -- see docs/vision-tier-design.md.
-        self.server_url = os.environ.get("DOLICO_MINERU_URL") or None
+        #
+        # DOLICO_VISION_URL is the name now that the tier has two engines and
+        # both want the same knob; DOLICO_MINERU_URL still works, because
+        # renaming a variable is not a reason to break a running deployment.
+        self.server_url = server_url()
         if self.server_url:
             self.backend = _remote_backend(self.backend)
         self._lock = threading.Lock()
@@ -152,6 +132,7 @@ class VisionEngine:
 
     def describe(self) -> dict[str, str]:
         return {
+            "engine": ENGINE_NAME,
             "backend": self.backend,
             "effort": self.effort,
             "server_url": self.server_url or "",

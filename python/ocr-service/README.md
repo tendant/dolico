@@ -9,11 +9,11 @@ Python installed.
 
 ## Three tiers
 
-| | Tier 1 — `paddleocr` | Tier 2 — `pp-structurev3` | Tier 3 — `mineru` |
+| | Tier 1 — `paddleocr` | Tier 2 — `pp-structurev3` | Tier 3 — `mineru` or `glm-ocr` |
 | --- | --- | --- | --- |
 | Detects | text lines | layout regions: headings, paragraphs, figures, **tables** | the whole page, by a 1.2B vision model |
 | A scanned table | 18 loose fragments | a 5×3 grid | a 5×3 grid |
-| Dependencies | base install | `+ paddlex[ocr]` (~150MB) | `+ mineru[core]` (torch, ~3.2GB of weights) |
+| Dependencies | base install | `+ paddlex[ocr]` (~150MB) | `+ mineru[core]` (torch, ~3.2GB of weights), or `+ glmocr[layout]` |
 | Selected by | the router, per page | the router, per page | the **router's escalation**, per page, after Tier 1/2 produced a bad read |
 | Cost | ~2.5s/page | ~3-8s/page | ~2-9s/page warm, plus ~6s of warm-up on the first call in a process |
 
@@ -174,9 +174,40 @@ Two things both OCR tiers provide that no other engine in the pipeline can:
 | `DOLICO_OCR_TEXTLINE_ORIENTATION` | off | per-line orientation |
 | `DOLICO_OCR_MAX_UPLOAD_BYTES` | 256MiB | per-request cap |
 | `DOLICO_OCR_LAZY_LOAD` | off | skip loading models at startup |
+| `DOLICO_VISION_ENGINE` | `mineru` | which engine is in the Tier 3 slot: `mineru` or `glm-ocr` |
+| `DOLICO_VISION_URL` | unset | run the vision model as its own service and only talk to it |
 | `DOLICO_MINERU_BACKEND` | `hybrid-engine` | Tier 3 backend — see below |
 | `DOLICO_MINERU_EFFORT` | `medium` | MinerU inference effort |
-| `DOLICO_MINERU_URL` | unset | run MinerU as its own service and only talk to it |
+| `DOLICO_MINERU_URL` | unset | the old name for `DOLICO_VISION_URL`; still honored |
+| `DOLICO_GLM_MODEL` | `glm-ocr` | the model name the GLM-OCR endpoint answers to |
+| `DOLICO_GLM_LAYOUT_DEVICE` | `cpu` | where PP-DocLayoutV3 runs |
+| `DOLICO_GLM_API_MODE` | `openai` | `ollama_generate` for an Ollama that 502s on vision requests |
+| `DOLICO_GLM_DPI` | `200` | render DPI for pages sent to GLM-OCR |
+
+### On which engine is in Tier 3
+
+Two implement the tier, and a service is **built** with one of them rather than
+switching between them: MinerU pins `transformers<5` and `glmocr` requires
+`transformers>=5.3`, so the two extras cannot be installed together.
+`DOLICO_VISION_ENGINE` names which one this build has.
+
+| | `mineru` (default) | `glm-ocr` |
+| --- | --- | --- |
+| Model | MinerU2.5-Pro-2605-1.2B | GLM-OCR, 0.9B |
+| Extra | `--extra vision` | `--extra glm` |
+| Runs | in this process, or remote | layout here, the VLM always remote |
+| Endpoint | optional | **required** — no endpoint means the tier is unavailable |
+| Licence | Apache-2.0 + a commercial threshold | Apache-2.0 code, MIT weights |
+| Measured here | yes — mean CER 0.011 | **no** |
+
+The default is the measured one and should stay that way until `make bench-glm`
+says otherwise. `docs/glm-ocr-tier-design.md` has the comparison that would
+settle it, with an empty column.
+
+GLM-OCR refuses to start without `DOLICO_VISION_URL`. That is deliberate: the
+library's own default is to post documents to a vendor cloud API, and every
+engine here is local by choice, so "installed but unconfigured" reports the
+tier unavailable rather than quietly sending a customer's page somewhere.
 
 ### On the MinerU backend
 
