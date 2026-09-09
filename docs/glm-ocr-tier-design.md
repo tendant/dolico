@@ -446,6 +446,47 @@ as" would not by itself justify a second engine to maintain. The honest
 outcomes are *better on the hard pages*, *materially cheaper for the same
 quality*, or *no*.
 
+## First measurements, from production
+
+Not the benchmark — that column is still empty — but the tier ran against real
+documents on the estate, and one result is decisive enough to record here.
+
+**It works on ordinary scanned pages.** Three pages of the deploy sweep came
+back from the cloud API with blocks (`blocks=2`, `blocks=3`, `blocks=2`), the
+mapping held, and the e2e sweep passed.
+
+**It reads nothing at all from `faded.pdf`.** Zero regions. Not zero *text* —
+zero regions, confirmed by calling the API directly with the rendered page and
+dumping its raw response, after checking the image we send is a real 2200×1700
+raster with 11M non-white pixels. The page comes back `vision_empty`, the OCR
+result stands, and that result is the single character `b`.
+
+That fixture is the reason the vision tier exists. MinerU recovers it at CER
+0.019 from the same pixels.
+
+**This is recorded concern #1, confirmed.** That concern said GLM-OCR's layout
+stage is PP-DocLayoutV3, the same family as Tier 2's PP-StructureV3, so a page
+whose regions Tier 2 fails to carve up will fail again — and only the *reading*
+of each region improves. It named the test: "compare detected regions, not just
+text." The regions are zero. There is nothing for the 0.9B model to read,
+however good it is at reading, because the stage in front of it found no
+document on the page.
+
+So the two engines are not interchangeable in the way "both are VLM document
+parsers" suggests. MinerU's hybrid backend does not depend on a separate
+detector agreeing there is something there; GLM-OCR's pipeline does. On clean
+scans that difference is invisible. On the degraded page — which is the only
+kind of page Tier 3 is called for — it is the whole difference.
+
+**What that means for the deployment as configured.** With the disagreement
+probe on, every document with a scanned page pays at least one cloud call, and
+each of those uploads a page off the host. The pages where the tier demonstrably
+helps are the ones OCR already read acceptably; the page where OCR failed, it
+does not rescue. That is a cost with no measured benefit yet, and the honest
+options are to measure it properly (`make bench-glm`), to turn the probe off
+and let only the threshold escalate, or to run MinerU for this tier and
+GLM-OCR not at all.
+
 ## Recorded concerns
 
 **1. Its layout stage is Tier 2's model family.** GLM-OCR detects regions with
