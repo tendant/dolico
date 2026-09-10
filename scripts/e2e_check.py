@@ -94,6 +94,21 @@ OCR_ENGINES = {"ocr-stub", "paddleocr", "pp-structurev3"}
 # fails against a deployment running the other while reporting it as a broken
 # vision tier rather than as its own stale assumption.
 NON_VISION_ENGINES = OCR_ENGINES | {"anydoc", "pdf-inspector"}
+
+# Engines that read a document without looking at pixels. Everything else --
+# the OCR tiers and whichever engine is in the Tier 3 slot -- got there by
+# reading an image, which is what the pixel checks below actually care about.
+NATIVE_ENGINES = {"anydoc", "pdf-inspector", "image"}
+
+
+def escalated(page: dict) -> bool:
+    """Whether Tier 3 replaced this page.
+
+    The vision tier is allowed to take a page away from OCR entirely -- that
+    is its whole purpose -- so an assertion that names an OCR engine has to
+    say "unless this page was escalated" or it fails on a working deployment.
+    """
+    return "vision" in (page.get("classification") or {}).get("reasons", [])
 # The tiers that actually read pixels, as opposed to the stub.
 REAL_OCR = {"paddleocr", "pp-structurev3"}
 # The OCR engine the assertions expect. Unset means "whichever is wired".
@@ -224,12 +239,20 @@ def main() -> int:
         check(f"the {OCR} tier is wired", wired == OCR, f"found {wired}")
 
     doc = upload("scanned.pdf").json()
+    # Any engine that reads pixels counts here. The check is "the page is not
+    # silently empty", and a page the vision tier rescued is not empty.
+    pixel_blocks = [
+        b for b in blocks(doc) if b["provenance"]["engine"] not in NATIVE_ENGINES
+    ]
+    check("the scanned page produced blocks, not silence", len(pixel_blocks) > 0)
     ocr_blocks = [b for b in blocks(doc) if b["provenance"]["engine"] in OCR_ENGINES]
-    check("the scanned page produced OCR blocks, not silence", len(ocr_blocks) > 0)
-    if OCR:
+    if OCR and not escalated(doc["pages"][0]):
         check(
             f"the scanned page was read by {OCR}",
-            all(b["provenance"]["engine"] == OCR for b in ocr_blocks),
+            # `ocr_blocks and ...` because all() of nothing is true: without it
+            # a page with no OCR blocks at all reports as read by the tier that
+            # never touched it.
+            bool(ocr_blocks) and all(b["provenance"]["engine"] == OCR for b in ocr_blocks),
             f"engines: {sorted({b['provenance']['engine'] for b in ocr_blocks})}",
         )
 
@@ -257,7 +280,13 @@ def main() -> int:
         for page in mixed["pages"]
     ]
     check("mixed.pdf page 1 was extracted natively", page_engines[0] == ["pdf-inspector"], f"{page_engines}")
-    check("mixed.pdf page 2 went to OCR", set(page_engines[1]) <= OCR_ENGINES, f"{page_engines}")
+    # Read from pixels rather than "read by OCR": page 2 may have been
+    # escalated to Tier 3, which is a correct outcome and not a native read.
+    check(
+        "mixed.pdf page 2 was read from pixels",
+        bool(page_engines[1]) and set(page_engines[1]).isdisjoint(NATIVE_ENGINES),
+        f"{page_engines}",
+    )
 
     if OCR in REAL_OCR:
         # Only real OCR can recover text that exists solely as pixels.
@@ -325,19 +354,27 @@ def main() -> int:
                 len(rows) > 1 and rows[1][0] == "North",
                 f"second row: {rows[1] if len(rows) > 1 else None}",
             )
-        labels = [b["provenance"]["method"] for b in blocks(table_doc)]
-        check(
-            "regions are labelled by the layout model",
-            all(m.startswith("pp-structurev3/layout:") for m in labels),
-            f"methods: {sorted(set(labels))}",
-        )
-        # Reading order: the page title must precede the table it introduces.
-        texts = [b.get("text", "") for b in table_doc["pages"][0]["blocks"]]
-        check(
-            "the page title comes before the table",
-            texts and "QUARTERLY" in texts[0].upper(),
-            f"first block text: {texts[0] if texts else None!r}",
-        )
+        # These two describe what PP-StructureV3 produced, so they only hold
+        # while PP-StructureV3's output is what survived. Tier 3 replacing the
+        # page is a correct outcome with different labels and its own reading
+        # order, and asserting Tier 2's shape against it fails a deployment
+        # that is working exactly as designed.
+        if escalated(table_doc["pages"][0]):
+            print("  (skipped: the page was escalated to the vision tier)")
+        else:
+            labels = [b["provenance"]["method"] for b in blocks(table_doc)]
+            check(
+                "regions are labelled by the layout model",
+                all(m.startswith("pp-structurev3/layout:") for m in labels),
+                f"methods: {sorted(set(labels))}",
+            )
+            # Reading order: the page title must precede the table it introduces.
+            texts = [b.get("text", "") for b in table_doc["pages"][0]["blocks"]]
+            check(
+                "the page title comes before the table",
+                bool(texts) and "QUARTERLY" in texts[0].upper(),
+                f"first block text: {texts[0] if texts else None!r}",
+            )
 
         md = requests.get(f"{BASE}/v1/documents/{table_doc['id']}.md", timeout=30).text
         check(
