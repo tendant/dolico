@@ -3,14 +3,23 @@ name = "dolico-ocr"
 version = "0.1.0"
 description = "Dolico OCR tier: rasterize PDF pages and read them with PaddleOCR"
 requires-python = ">=3.11,<3.13"
+# What the service needs to exist at all: serve HTTP, rasterize a PDF, and
+# hand pixels to whichever engine is installed. No model, and no engine.
+#
+# Paddle used to be here. It moved to an extra so a deployment that reads
+# pages somewhere else -- GLM-OCR's cloud API, say -- does not carry a
+# gigabyte of local inference it never calls. See `text` and `structure`.
+#
+# Pillow is named explicitly now rather than arriving through PaddleOCR:
+# raster.wrap_image and raster.image_to_pdf both use it, and they are on the
+# path of every request regardless of engine.
 dependencies = [
     "fastapi>=0.115",
     "uvicorn[standard]>=0.32",
     "python-multipart>=0.0.12",
     "pypdfium2>=4.30",
     "numpy>=1.26",
-    "paddlepaddle>=3.0",
-    "paddleocr>=3.0",
+    "pillow>=10.0",
 ]
 
 # PaddlePaddle publishes no wheels for 3.13+ yet, hence the upper bound above.
@@ -23,7 +32,14 @@ dev = ["pytest>=8.0", "httpx>=0.27"]
 # deployment that only wants text lines should not have to carry it. `make ocr`
 # installs it, and the service degrades to Tier 1 with a loud log line when it
 # is missing.
-structure = ["paddlex[ocr]>=3.7"]
+# Tier 1: text-line OCR. The floor -- it reads any page, badly, and reports a
+# real per-block confidence, which is the signal every escalation decision is
+# made from.
+text = ["paddlepaddle>=3.0", "paddleocr>=3.0"]
+
+# Tier 2: layout analysis and table recognition. A superset of Tier 1, because
+# PP-StructureV3 is driven through the same PaddleOCR install.
+structure = ["paddlepaddle>=3.0", "paddleocr>=3.0", "paddlex[ocr]>=3.7"]
 # MinerU (Tier 3: the fallback for pages the OCR tiers lose). Much heavier
 # again -- roughly 1GB of packages plus ~8GB of model weights on first run --
 # and it only ever runs on pages that already failed twice, so it is opt-in

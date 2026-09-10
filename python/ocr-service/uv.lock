@@ -442,8 +442,7 @@ source = { editable = "." }
 dependencies = [
     { name = "fastapi" },
     { name = "numpy" },
-    { name = "paddleocr" },
-    { name = "paddlepaddle" },
+    { name = "pillow" },
     { name = "pypdfium2" },
     { name = "python-multipart" },
     { name = "uvicorn", extra = ["standard"] },
@@ -461,7 +460,13 @@ glm-selfhosted = [
     { name = "glmocr", extra = ["layout"], marker = "extra == 'extra-10-dolico-ocr-glm-selfhosted'" },
 ]
 structure = [
+    { name = "paddleocr" },
+    { name = "paddlepaddle" },
     { name = "paddlex", extra = ["ocr"] },
+]
+text = [
+    { name = "paddleocr" },
+    { name = "paddlepaddle" },
 ]
 vision = [
     { name = "mineru", extra = ["core"], marker = "extra == 'extra-10-dolico-ocr-vision'" },
@@ -479,9 +484,12 @@ requires-dist = [
     { name = "httpx", marker = "extra == 'dev'", specifier = ">=0.27" },
     { name = "mineru", extras = ["core"], marker = "extra == 'vision'", specifier = ">=2.5,<4" },
     { name = "numpy", specifier = ">=1.26" },
-    { name = "paddleocr", specifier = ">=3.0" },
-    { name = "paddlepaddle", specifier = ">=3.0" },
+    { name = "paddleocr", marker = "extra == 'structure'", specifier = ">=3.0" },
+    { name = "paddleocr", marker = "extra == 'text'", specifier = ">=3.0" },
+    { name = "paddlepaddle", marker = "extra == 'structure'", specifier = ">=3.0" },
+    { name = "paddlepaddle", marker = "extra == 'text'", specifier = ">=3.0" },
     { name = "paddlex", extras = ["ocr"], marker = "extra == 'structure'", specifier = ">=3.7" },
+    { name = "pillow", specifier = ">=10.0" },
     { name = "pypdfium2", specifier = ">=4.30" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0" },
     { name = "python-multipart", specifier = ">=0.0.12" },
@@ -491,7 +499,7 @@ requires-dist = [
     { name = "torchvision", marker = "sys_platform != 'linux' and extra == 'vision'" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.32" },
 ]
-provides-extras = ["dev", "structure", "vision", "glm", "glm-selfhosted"]
+provides-extras = ["dev", "text", "structure", "vision", "glm", "glm-selfhosted"]
 
 [[package]]
 name = "einops"
