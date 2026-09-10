@@ -466,3 +466,62 @@ class TestBBoxConversion:
         assert payload["blocks"] == []
         assert payload["classification"]["confidence"] == 0.0
         assert "no_text_found" in payload["classification"]["reasons"]
+
+
+class TestVisionAsTheServingTier:
+    """DOLICO_OCR_TIER=vision: every page goes to Tier 3, Paddle is never called.
+
+    For a deployment whose OCR tiers cost more than they contribute. Measured
+    on the estate this runs on: PP-StructureV3 spent 38s on a phone photo whose
+    result the vision tier then replaced entirely, having read it in 11s.
+    """
+
+    @pytest.fixture
+    def serving(self, monkeypatch):
+        fake = FakeVisionEngine()
+        monkeypatch.setattr(app_module, "vision", fake)
+        monkeypatch.setattr(app_module.vision_mod, "available", lambda: True)
+        monkeypatch.setattr(app_module, "TIER", "vision")
+        with TestClient(app_module.app) as c:
+            c.fake = fake
+            yield c
+
+    def post(self, client, pages="", name="scanned.pdf", tier=""):
+        data = {"pages": pages}
+        if tier:
+            data["tier"] = tier
+        return client.post(
+            "/v1/documents" if False else "/v1/extract",
+            files={"file": (name, pdf(name), "application/pdf")},
+            data=data,
+        )
+
+    def test_a_request_with_no_tier_is_served_by_vision(self, serving):
+        body = self.post(serving).json()
+        assert body["engine"] == "mineru"
+        assert serving.fake.calls == [1]
+
+    def test_no_page_list_means_the_whole_document(self, serving):
+        # As an escalation this is a 400; as the serving tier it is "read it
+        # all", exactly as the OCR tiers behave.
+        body = self.post(serving, name="mixed.pdf").json()
+        assert serving.fake.calls == [1, 2]
+        assert [p["number"] for p in body["pages"]] == [1, 2]
+
+    def test_the_reported_tier_says_vision(self, serving):
+        version = serving.get("/v1/version").json()
+        assert version["tier"] == "vision"
+        assert version["engine"] == "mineru"
+
+    def test_nothing_is_advertised_to_escalate_to(self, serving):
+        # Escalating to the engine that already read the page is two calls for
+        # one answer and a guaranteed agreement.
+        assert serving.get("/healthz").json()["vision_available"] is False
+        assert serving.get("/v1/version").json()["vision_available"] is False
+
+    def test_paddle_is_never_asked_to_load(self, serving, monkeypatch):
+        called = []
+        monkeypatch.setattr(app_module.engine, "load", lambda: called.append("t1"))
+        monkeypatch.setattr(app_module.structure, "load", lambda: called.append("t2"))
+        self.post(serving)
+        assert called == []

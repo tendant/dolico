@@ -176,6 +176,7 @@ Two things both OCR tiers provide that no other engine in the pipeline can:
 | `DOLICO_OCR_TEXTLINE_ORIENTATION` | off | per-line orientation |
 | `DOLICO_OCR_MAX_UPLOAD_BYTES` | 256MiB | per-request cap |
 | `DOLICO_OCR_LAZY_LOAD` | off | skip loading models at startup |
+| `DOLICO_OCR_TIER` | `auto` | `layout`, `text`, or `vision` to make Tier 3 the serving tier |
 | `DOLICO_VISION_ENGINE` | `mineru` | which engine is in the Tier 3 slot: `mineru` or `glm-ocr` |
 | `DOLICO_VISION_URL` | unset | run the vision model as its own service and only talk to it |
 | `DOLICO_MINERU_BACKEND` | `hybrid-engine` | Tier 3 backend — see below |
@@ -186,6 +187,26 @@ Two things both OCR tiers provide that no other engine in the pipeline can:
 | `DOLICO_GLM_LAYOUT_DEVICE` | `cpu` | where PP-DocLayoutV3 runs |
 | `DOLICO_GLM_API_MODE` | `openai` | `ollama_generate` for Ollama, whose OpenAI-compatible path 502s on vision requests |
 | `DOLICO_GLM_DPI` | `200` | render DPI for pages sent to GLM-OCR |
+
+### Serving Tier 3 directly
+
+`DOLICO_OCR_TIER=vision` makes the Tier 3 engine the *serving* tier: every page
+goes straight to it and Paddle is never called. It is also what an image built
+with neither `text` nor `structure` does automatically, which is what makes a
+cloud-only deployment possible -- 32 packages against 102.
+
+It is for a deployment where the OCR tiers cost more than they contribute.
+Measured on the estate this runs on, with GLM-OCR in the Tier 3 slot: a phone
+photo took **38s in PP-StructureV3 and 11s in GLM-OCR**, and the probe then
+discarded the Paddle result entirely. Paying for both is the worst of the
+three options.
+
+What it gives up is the tier structure itself. There is no second opinion, no
+per-block confidence, and therefore no escalation signal -- so `/healthz`
+reports `vision_available: false` while this is on, because escalating to the
+engine that already read the page is two calls for one answer. If the engine
+cannot load, the service refuses to start rather than falling back to an OCR
+tier the operator did not ask for.
 
 ### On which engine is in Tier 3
 

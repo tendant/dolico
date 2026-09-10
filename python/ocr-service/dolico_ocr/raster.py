@@ -71,6 +71,29 @@ def is_pdf(data: bytes) -> bool:
     return data[:5] == b"%PDF-"
 
 
+def page_count(data: bytes) -> int:
+    """How many pages the document has, without rendering any of them.
+
+    A standalone image is one page, which is the same reading `wrap_image`
+    takes. Used by the vision tier when it is serving as the default tier and
+    the caller named no pages: it has to know how many there are to read them
+    all, and rasterizing the whole document to count is the expensive way to
+    find out.
+    """
+    if not is_pdf(data):
+        return 1
+    try:
+        import pypdfium2 as pdfium
+
+        doc = pdfium.PdfDocument(data)
+        try:
+            return len(doc)
+        finally:
+            doc.close()
+    except Exception as exc:
+        raise RasterError(f"cannot read the document: {exc}") from exc
+
+
 def render_pdf_pages(
     data: bytes, pages: list[int] | None = None, dpi: int = DEFAULT_DPI
 ) -> list[RasteredPage]:

@@ -100,3 +100,35 @@ class TestSharedEndpoint:
     def test_mineru_still_switches_to_its_http_backend(self, monkeypatch):
         monkeypatch.setenv("DOLICO_VISION_URL", "http://mineru:8000")
         assert vision_mineru.MineruEngine().backend == "hybrid-http-client"
+
+
+class TestServingTierSelection:
+    """Which tier serves, including in an image with no Paddle at all."""
+
+    def _app(self, monkeypatch, tier, paddle, vision_ok):
+        from dolico_ocr import app as app_module
+
+        monkeypatch.setattr(app_module, "TIER", tier)
+        monkeypatch.setattr(app_module, "_paddle_available", lambda: paddle)
+        monkeypatch.setattr(app_module.vision_mod, "available", lambda: vision_ok)
+        return app_module
+
+    def test_vision_is_taken_when_asked_for(self, monkeypatch):
+        assert self._app(monkeypatch, "vision", True, True)._serve_vision() is True
+
+    def test_auto_falls_to_vision_when_there_is_no_paddle(self, monkeypatch):
+        # A cloud-only image has no OCR tier. Refusing to start would be a
+        # worse answer than serving the engine that is actually installed.
+        assert self._app(monkeypatch, "auto", False, True)._serve_vision() is True
+
+    def test_auto_prefers_paddle_when_it_is_there(self, monkeypatch):
+        assert self._app(monkeypatch, "auto", True, True)._serve_vision() is False
+
+    def test_auto_does_not_invent_a_tier_when_nothing_is_installed(self, monkeypatch):
+        # Neither available: _serve_vision stays false and startup fails on the
+        # OCR engine, which is the honest error rather than a silent stub.
+        assert self._app(monkeypatch, "auto", False, False)._serve_vision() is False
+
+    def test_an_explicit_ocr_tier_is_never_overridden(self, monkeypatch):
+        for tier in ("text", "layout"):
+            assert self._app(monkeypatch, tier, False, True)._serve_vision() is False

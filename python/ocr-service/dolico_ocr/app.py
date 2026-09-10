@@ -28,7 +28,15 @@ from .canonical import (
 )
 from .engine import OCREngine
 from .layout import group_lines
-from .raster import DEFAULT_DPI, RasterError, image_to_pdf, is_pdf, render_pdf_pages, wrap_image
+from .raster import (
+    DEFAULT_DPI,
+    RasterError,
+    image_to_pdf,
+    is_pdf,
+    page_count,
+    render_pdf_pages,
+    wrap_image,
+)
 from .structure import StructureEngine
 from .vision_base import VisionError
 
@@ -52,7 +60,17 @@ structure = StructureEngine(lang=LANG)
 # milliseconds.
 vision = vision_mod.new_engine()
 
-# "layout" | "text" | "auto". Auto uses Tier 2 when it is installable.
+# "layout" | "text" | "vision" | "auto".
+#
+# `auto` prefers Tier 2 when it is installable and falls back to Tier 1.
+# `vision` is different in kind: it makes the Tier 3 engine the *serving*
+# tier, so every page goes straight to it and Paddle is never called. That is
+# for a deployment whose OCR tiers are not worth their latency -- measured on
+# the estate this runs on, PP-StructureV3 spent 38s on a phone photo whose
+# result the vision tier then replaced entirely, having read it in 11s.
+#
+# It is also the only tier setting that can run in an image with no Paddle
+# installed at all, which is what makes a cloud-only deployment possible.
 TIER = os.environ.get("DOLICO_OCR_TIER", "auto").strip().lower()
 
 MAX_UPLOAD_BYTES = int(os.environ.get("DOLICO_OCR_MAX_UPLOAD_BYTES", 256 << 20))
@@ -68,6 +86,32 @@ MAX_UPLOAD_BYTES = int(os.environ.get("DOLICO_OCR_MAX_UPLOAD_BYTES", 256 << 20))
 WORKERS = max(1, int(os.environ.get("DOLICO_OCR_WORKERS", "1")))
 
 
+def _serve_vision() -> bool:
+    """Whether the vision engine is the serving tier rather than an escalation.
+
+    Asked for explicitly, or taken when there is no OCR tier to fall back on:
+    an image built without the `text` or `structure` extras has no Paddle, and
+    refusing to start would be a worse answer than serving what is installed.
+    """
+    if TIER == "vision":
+        return True
+    return TIER == "auto" and not _paddle_available() and vision_mod.available()
+
+
+def _paddle_available() -> bool:
+    """Whether any Paddle-backed tier can run here.
+
+    Tier 2's own check covers Tier 1 too: both are driven through the same
+    PaddleOCR install, so if that import fails neither can serve.
+    """
+    try:
+        import paddleocr  # noqa: F401,PLC0415
+
+        return True
+    except Exception:
+        return False
+
+
 def _use_structure() -> bool:
     if TIER == "text":
         return False
@@ -78,9 +122,17 @@ def _use_structure() -> bool:
 
 def active_engine():
     """The tier actually serving requests, and the name it reports."""
+    if _serve_vision():
+        return vision, vision_mod.ENGINE_NAME
     if _use_structure():
         return structure, structure_mod.ENGINE_NAME
     return engine, ENGINE_NAME
+
+
+def _tier_label() -> str:
+    if _serve_vision():
+        return "vision"
+    return "layout" if _use_structure() else "text"
 
 
 @asynccontextmanager
@@ -95,6 +147,14 @@ async def lifespan(_: FastAPI):
             log.info("serving tier %s", name)
         except Exception as exc:
             if active is engine:
+                raise
+            if active is vision:
+                # Nothing to fall back to. A cloud-only image has no Paddle at
+                # all, and where it does, quietly dropping to an OCR tier the
+                # operator did not ask for would serve worse pages under a
+                # config that promises this engine. Refusing to start is the
+                # honest failure: it is visible immediately, in one place.
+                log.error("the vision tier is the serving tier and will not load: %s", exc)
                 raise
             # PP-StructureV3 needs the `paddlex[ocr]` extras. Falling back is
             # better than refusing to start -- Tier 1 still reads the page --
@@ -120,12 +180,15 @@ def healthz() -> JSONResponse:
             "status": "ok" if ready else "loading",
             "engine": name,
             "engine_version": active.version,
-            "tier": "layout" if active is structure else "text",
+            "tier": _tier_label(),
             "workers": WORKERS,
             "structure_available": structure_mod.available(),
             # Advertised separately from the serving tier: vision is reached
-            # per page by the router, never as this service's default tier.
-            "vision_available": vision_mod.available(),
+            # per page by the router -- unless it *is* the serving tier, in
+            # which case there is nothing to escalate to. Saying otherwise
+            # would have the router probe the same engine that just read the
+            # page: two calls, one answer, guaranteed agreement.
+            "vision_available": vision_mod.available() and not _serve_vision(),
             "vision": vision.describe(),
             "schema_version": SCHEMA_VERSION,
             "service_version": __version__,
@@ -146,9 +209,9 @@ def version() -> dict:
         # tier produced.
         "engine": name,
         "engine_version": active.version,
-        "tier": "layout" if active is structure else "text",
+        "tier": _tier_label(),
         "workers": WORKERS,
-        "vision_available": vision_mod.available(),
+        "vision_available": vision_mod.available() and not _serve_vision(),
         "vision_engine": vision_mod.ENGINE_NAME,
     }
 
@@ -186,7 +249,7 @@ async def extract(
 
     dpi = max(72, min(600, dpi))
 
-    if tier.strip().lower() == "vision":
+    if tier.strip().lower() == "vision" or _serve_vision():
         return await _extract_vision(data, wanted, started)
 
     try:
@@ -247,11 +310,20 @@ async def _extract_vision(data: bytes, wanted: list[int] | None, started: float)
             f"the vision tier ({vision_mod.ENGINE_NAME}) is not available here",
         )
     if not wanted:
-        return _error(
-            400,
-            "malformed",
-            "the vision tier extracts named pages only; pass `pages`",
-        )
+        # Named pages only while this is an *escalation*: a whole-document
+        # vision request is then a caller mistake, not something to honor
+        # expensively. Serving as the default tier it is the opposite -- no
+        # page list means the whole document, exactly as the OCR tiers read it.
+        if not _serve_vision():
+            return _error(
+                400,
+                "malformed",
+                "the vision tier extracts named pages only; pass `pages`",
+            )
+        try:
+            wanted = list(range(1, page_count(data) + 1))
+        except RasterError as exc:
+            return _error(422, "malformed", str(exc))
 
     # A standalone image is wrapped as a one-page PDF rather than refused.
     #
